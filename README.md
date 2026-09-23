@@ -1,20 +1,21 @@
-# MSLoc：XCLIP 神经元探测与 DeMamba 训练实验
+# MSLoc：第一阶段与第二阶段实验
 
-本说明覆盖当前第一阶段实验：冻结本地预训练的 XCLIP，利用真假视频对探测伪造敏感神经元，将最终固定的 768 维特征送入后续模块，训练 XCLIP、DeMamba 和分类头
+本说明按两个阶段组织：第一阶段利用 XCLIP 特征与 DeMamba 识别异常片段并生成 proposal；第二阶段以 proposal 为基础，开展多模态大模型训练与评测。具体步骤见下方目录。
 
-注意：本说明中的命令之前已运行，无需再次运行，新运行指令如下：
+## 阶段目录
 
-1、【可直接运行】小模型阶段的 DINOv2/DINOv3 神经元探测实验，以及 DINOv2/DINOv3/XCLIP 在 ActivityForensics 上的泛化测试，详见 [补充说明](SupplyREADME.md)。
+- [第一阶段：小模型实验](#第一阶段小模型实验)
+- [第二阶段：大模型实验](#第二阶段大模型实验)
 
-2、【可直接运行】大模型阶段以小模型阶段生成的proposal为基础，依次开展 SFT、OPD 与 GRPO 训练；运行说明请参阅 [运行指令](Trace/README_RUN_OPD_GRPO.md)。
+## 第一阶段：小模型实验
 
+【可直接运行】小模型阶段的 DINOv2/DINOv3 神经元探测实验，以及 DINOv2/DINOv3/XCLIP 在 ActivityForensics 上的泛化测试，详见 [补充说明](SupplyREADME.md)。
 
-
-## 0. 目录结构
+### 0. 目录结构
 
 所有命令均在服务器的 `MSLoc_code` 目录执行；命令中的所有路径均为相对路径。数据、预训练模型、缓存、中间结果、模型权重、评测与可视化结果均写入同级目录 `../MSLoc_data`。
 
-## 1. 环境安装与检查
+### 1. 环境安装与检查
 
 ```bash
 conda create -n msloc python=3.10 -y
@@ -40,7 +41,7 @@ python -c "from transformers import XCLIPVisionModel; m=XCLIPVisionModel.from_pr
 预期输出包含 `offline XCLIP loaded: 768 12`。
 
 
-## 2. 下载数据集和模型权重
+### 2. 下载数据集和模型权重
 
 ```bash
 cd ..
@@ -59,7 +60,7 @@ MSLoc_data/
 └── Trace
 ```
 
-## 3. 抽帧
+### 3. 抽帧
 
 ```bash
 python DeMamba/Preprocess/video2frame.py \
@@ -68,7 +69,7 @@ python DeMamba/Preprocess/video2frame.py \
   --num_workers 8
 ```
 
-## 4. 生成全量配置文件
+### 4. 生成全量配置文件
 
 ```bash
 mkdir -p ../MSLoc_data/DeMamba/full/configs
@@ -127,7 +128,7 @@ transform_config: {
 YAML
 ```
 
-## 5. 构造全量神经元探测对
+### 5. 构造全量神经元探测对
 
 ```bash
 mkdir -p ../MSLoc_data/DeMamba/full/method/neuron_probe
@@ -140,7 +141,7 @@ python DeMamba/build_probe_pairs.py \
   --strict
 ```
 
-## 6. 探测并保存最终 768 个神经元
+### 6. 探测并保存最终 768 个神经元
 
 ```bash
 python DeMamba/probe_xclip_neurons.py \
@@ -154,12 +155,12 @@ python DeMamba/probe_xclip_neurons.py \
   --strict
 ```
 
-## 7. 训练与评测
+### 7. 训练与评测
 
 训练使用 PyTorch `DataParallel`。单卡使用 `--device-ids 0`，单机 8 卡使用 `--device-ids 0,1,2,3,4,5,6,7`；不要使用 `torchrun`。
 
 
-### 7.1 Baseline：全维冻结 XCLIP 特征 + Mamba + 分类头
+#### 7.1 Baseline：全维冻结 XCLIP 特征 + Mamba + 分类头
 
 训练：
 
@@ -184,7 +185,7 @@ python DeMamba/eval.py \
   --val-batch-size 16
 ```
 
-### 7.2 方法：768 个探测神经元 + Mamba + 分类头
+#### 7.2 方法：768 个探测神经元 + Mamba + 分类头
 
 训练：
 
@@ -213,4 +214,40 @@ python DeMamba/eval.py \
 python evaluate_long.py \
   --gt_file "../MSLoc_data/test_all_1209_0119_long.json" \
   --infer_file "../MSLoc_data/DeMamba/full/method/eval/predictions.json"
+```
+
+## 第二阶段：大模型实验（Qwen3.5版本）
+
+【可直接运行】Trace旧版本：大模型阶段以小模型阶段生成的proposal为基础，依次开展 SFT、OPD 与 GRPO 训练；运行说明请参阅 [运行指令](Trace/README_RUN_OPD_GRPO.md)。
+
+第二阶段代码统一放在 `Qwen/`；以下命令均在本仓库根目录执行。使用后训练版 `Qwen/Qwen3.5-4B`，SFT、OPD/OPSD 和 GRPO 共用独立环境。
+
+### 环境配置
+
+创建第二阶段环境 `msloc_qwen35`，并安装训练依赖：
+
+```bash
+conda create -n msloc_qwen35 python=3.12 -y
+conda activate msloc_qwen35
+conda install -y -c nvidia/label/cuda-12.8.0 cuda-toolkit=12.8.0
+conda install -y -c conda-forge cuda-compat=12.8.1 ffmpeg=7
+source Qwen/env.sh
+python -m pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install --upgrade pip setuptools wheel ninja packaging
+python -m pip install --no-build-isolation -r Qwen/requirements.txt
+```
+
+`Qwen/requirements.txt` 固定了训练、视频解码和加速依赖。新开终端时都要运行：
+
+```bash
+conda activate msloc_qwen35
+source Qwen/env.sh
+```
+
+### 模型下载
+
+环境配置后、开始任何第二阶段实验前，从本仓库根目录下载一次模型。产物是 `../Qwen/Qwen3.5-4B/`，与后续代码目录 `Qwen/` 分开：
+
+```bash
+hf download Qwen/Qwen3.5-4B --local-dir ../Qwen/Qwen3.5-4B
 ```
