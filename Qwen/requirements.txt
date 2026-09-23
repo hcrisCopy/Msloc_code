@@ -1,5 +1,5 @@
 # 第二阶段 Qwen3.5-4B：SFT、OPD/OPSD 与 GRPO 共用环境。
-# PyTorch/CUDA 在 README 中先单独安装；以下包在已装 PyTorch 后使用 --no-build-isolation 安装。
+# PyTorch/CUDA、causal-conv1d、flash-attn 按 README 的顺序分别安装。
 ms-swift==4.5.3
 transformers==5.9.0
 trl==0.27.0
@@ -10,5 +10,3 @@ torchcodec==0.10.0
 deepspeed==0.18.7
 liger-kernel==0.8.3
 flash-linear-attention==0.4.2
-causal-conv1d==1.7.0
-flash-attn==2.8.3

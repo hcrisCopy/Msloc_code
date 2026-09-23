@@ -235,9 +235,11 @@ source Qwen/env.sh
 python -m pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu128
 python -m pip install --upgrade pip setuptools wheel ninja packaging
 python -m pip install --no-build-isolation -r Qwen/requirements.txt
+CAUSAL_CONV1D_FORCE_BUILD=TRUE python -m pip install causal-conv1d==1.7.0 --no-build-isolation
+FLASH_ATTENTION_FORCE_BUILD=TRUE python -m pip install flash-attn==2.8.3 --cache-dir ../MSLoc_data/.cache/pip --no-build-isolation
 ```
 
-`Qwen/requirements.txt` 固定了训练、视频解码和加速依赖。新开终端时都要运行：
+`Qwen/requirements.txt` 固定了训练、视频解码和其他加速依赖。`env.sh` 将 Flash Attention 的缓存和安装临时文件放在 `../MSLoc_data/.cache/`。新开终端时都要运行：
 
 ```bash
 conda activate msloc_qwen35
@@ -251,3 +253,19 @@ source Qwen/env.sh
 ```bash
 hf download Qwen/Qwen3.5-4B --local-dir ../Qwen/Qwen3.5-4B
 ```
+
+qwen3.5评测
+
+qwen3.5 SFT训练
+
+qwen3.5 SFT评测
+
+qwen3.5带特权信息教师评测
+
+opd
+
+opd学生评测
+
+grpo
+
+grpo评测
