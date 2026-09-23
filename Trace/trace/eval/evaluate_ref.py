@@ -1,0 +1,610 @@
+import copy
+import os
+import torch
+try:
+    import torch_npu
+    from torch_npu.contrib import transfer_to_npu
+    print('Using NPU')
+except:
+    print('Using GPU')
+import argparse
+import traceback
+
+import sys
+# Adjust sys.path so that the `trace` package (located at MSLoc/Trace/trace) is importable.
+current_file_path = os.path.abspath(__file__)
+# .../trace/eval/evaluate_ref.py -> .../trace/eval -> .../trace -> .../Trace (repo root)
+trace_eval_dir = os.path.dirname(current_file_path)
+trace_pkg_dir = os.path.dirname(trace_eval_dir)
+repo_root = os.path.dirname(trace_pkg_dir)
+
+if repo_root in sys.path:
+    sys.path.remove(repo_root)
+sys.path.insert(0, repo_root)
+
+from trace.conversation import conv_templates
+from trace.constants import DEFAULT_MMODAL_TOKEN, MMODAL_TOKEN_INDEX
+from trace.mm_utils import get_model_name_from_path, tokenizer_MMODAL_token, process_video, process_image, process_video_ref_split
+from trace.model.builder import load_pretrained_model
+from trace.conversation import conv_templates, SeparatorStyle
+from trace.mm_utils import tokenizer_MMODAL_token_all, KeywordsStoppingCriteria
+from trace.opd_grpo import TraceTokenSpec, parse_trace_tokens, VALID_EVENT, VALID_NO_EVENT, FORMAT_FAILURE
+
+from transformers import StoppingCriteria, StoppingCriteriaList
+from math import ceil
+from PIL import Image
+import numpy as np
+import torch.backends.cudnn as cudnn
+import decord
+
+# decord.bridge.set_bridge('torch')
+import logging
+from torchvision.transforms.functional import InterpolationMode
+
+from torchvision import transforms
+import pdb
+import json
+from pathlib import Path
+import time
+import datetime
+from tqdm import tqdm
+import random
+
+random.seed(1234)
+
+
+def safe_decode_text(tokenizer, token_ids):
+    """Decode only base text-token ids; generated sync/time/score ids are not SentencePiece ids."""
+    base_vocab_size = getattr(tokenizer, "vocab_size", None)
+    filtered_ids = []
+    for token_id in token_ids:
+        token_id = int(token_id)
+        if token_id < 0:
+            continue
+        if base_vocab_size is not None and token_id >= base_vocab_size:
+            continue
+        filtered_ids.append(token_id)
+    return tokenizer.decode(filtered_ids, skip_special_tokens=True) if filtered_ids else ""
+
+
+def read_txt(path):
+    with open(path, "r") as fin:
+        data = fin.readline().strip()
+    return data
+
+
+def load_data(args, anno_path, split=None):
+    '''
+    anno data example:
+    {"annotations":
+        [
+            {
+                "image_id": "xHr8X2Wpmno.mp4"
+                ...
+            },
+            ...
+        ]
+    }
+    
+    Or training data format:
+    [
+        {
+            "video": "path/to/video.mp4",
+            "id": 1,
+            "conversations": [...],
+            "times": [[start, end], ...],
+            ...
+        },
+        ...
+    ]
+    '''
+    if args.anno_file:
+        file_path = args.anno_file
+    else:
+        file_path = os.path.join(anno_path, f'{split}.caption_coco_format.json')
+    
+    print(f"Loading annotations from {file_path}")
+    with open(file_path, 'r', encoding='utf-8') as f:
+        raw = json.load(f)
+
+    # Accept three input shapes:
+    # 1) {"annotations": [...]}  (COCO-style)
+    # 2) [...]                  (annotations array directly)
+    # 3) Training-data format    (uses `video` instead of `image_id`)
+    if isinstance(raw, dict):
+        if "video_path" in raw or "video" in raw:
+            data = [raw]
+        else:
+            data = raw.get("annotations", [])
+    elif isinstance(raw, list):
+        data = raw
+    else:
+        raise TypeError(f"Unsupported annotation json root type: {type(raw)}")
+
+    # Convert raw / training annotations into the eval format.
+    # Accept both `video_path` (custom) and `video` (training).
+    if data and isinstance(data[0], dict):
+        needs_conversion = False
+        if "image_id" not in data[0]:
+            if "video" in data[0] or "video_path" in data[0]:
+                needs_conversion = True
+        
+        if needs_conversion:
+            print("Detected training/raw data format, converting to evaluation format...")
+            converted_data = []
+            for idx, item in enumerate(data):
+                # Copy the original item to keep all fields (source, duration, ...).
+                converted_item = item.copy()
+                
+                # Prefer video_path, fall back to video.
+                vid = item.get("video_path") or item.get("video")
+                
+                # Use the index as fallback id.
+                item_id = item.get("id")
+                if item_id is None:
+                    item_id = idx
+
+                # Fields required by the model.
+                converted_item["image_id"] = vid
+                converted_item["id"] = item_id
+                if "caption" not in converted_item:
+                    converted_item["caption"] = ""  # caption is unused at inference time
+                
+                # Carry segments through if available.
+                if "times" in item and item["times"]:
+                    converted_item["segments"] = item["times"]
+                elif "segments" in item:
+                    converted_item["segments"] = item["segments"]
+                
+                converted_data.append(converted_item)
+            data = converted_data
+            print(f"Converted {len(data)} samples from raw format to evaluation format")
+
+    if args.debug:
+        data = data[:10]
+    return data
+
+
+def result_file_name(args, split_name='test', format=False):
+    file_name = f'{args.dataset}_{split_name}_f{args.num_frames}_result.json'
+    if args.timestamp:
+        if args.timestamp_file != '':
+            file_name = f'{args.dataset}_{split_name}_f{args.num_frames}_result_with_pred_timestamp.json'
+        else:
+            file_name = f'{args.dataset}_{split_name}_f{args.num_frames}_result_with_gt_timestamp.json'
+    if args.num_chunks > 1:
+        file_name = file_name.replace('.json', f'_chunk{args.chunk_idx}.json')
+    if args.debug:
+        file_name = 'debug_' + file_name
+    if format:
+        file_name = 'fmt_' + file_name
+    return file_name
+
+
+def save_result(args, output_dir, results, split_name='test', format=False):
+    """Atomically persist the final result list."""
+
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    file_name = result_file_name(args, split_name, format)
+
+    destination = Path(output_dir) / file_name
+    temporary = destination.with_suffix(destination.suffix + '.tmp')
+    with temporary.open('w', encoding='utf-8') as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    temporary.replace(destination)
+    return
+
+
+def result_item_key(item):
+    return str(item.get('video_path') or item.get('video') or item.get('image_id') or item.get('id'))
+
+
+def get_timestamp_from_file(timestamp_file):
+    timestamp = {}
+    with open(timestamp_file, 'r') as f:
+        data = json.load(f)
+        for vid, vlist in data.items():
+            timestamp[vid] = []
+            for vterm in vlist:
+                timestamp[vid].append(vterm["timestamp"])
+    return timestamp
+
+
+def main(args):    
+    num_beams = 1
+    temperature = args.temperature
+    top_p = args.top_p
+    n_frms = args.num_frames
+    eval_start_time = time.time()
+    prompt = read_txt(args.prompt_file)
+
+    # Suppress non-essential logs on every chunk except chunk 0.
+    is_master = (int(getattr(args, 'chunk_idx', 0)) == 0)
+    if getattr(args, 'quiet_non_master', False) and not is_master:
+        import builtins
+        _orig_print = builtins.print
+
+        def _quiet_print(*p_args, **p_kwargs):
+            # Allow explicit force=True to bypass quiet mode.
+            if p_kwargs.pop('force', False):
+                return _orig_print(*p_args, **p_kwargs)
+            return None
+
+        builtins.print = _quiet_print
+
+    final_result_path = Path(args.output_dir) / result_file_name(args, args.split, format=True)
+    progress_path = final_result_path.with_suffix(final_result_path.suffix + '.progress.jsonl')
+    progress_manifest = progress_path.with_suffix(progress_path.suffix + '.run.json')
+    run_identity = {
+        'annotation': str(Path(args.anno_file).resolve()) if args.anno_file else str(Path(args.anno_path).resolve()),
+        'model': str(Path(args.model_path).resolve()),
+        'video_root': str(Path(args.video_path).resolve()),
+        'vision_tower': str(Path(args.vision_tower).resolve()) if args.vision_tower else None,
+        'prompt_file': str(Path(args.prompt_file).resolve()),
+        'num_frames': args.num_frames,
+        'max_new_tokens': args.max_new_tokens,
+        'sample_num': args.sample_num,
+        'num_chunks': args.num_chunks,
+        'chunk_idx': args.chunk_idx,
+        'bnd_ratio': args.bnd_ratio,
+        'bnd_frames': args.bnd_frames,
+        'seg_frames': args.seg_frames,
+    }
+    if args.resume:
+        if not progress_manifest.is_file():
+            raise FileNotFoundError(f"Resume metadata is missing: {progress_manifest}; clean and start again")
+        previous_identity = json.loads(progress_manifest.read_text(encoding='utf-8'))
+        if previous_identity != run_identity:
+            raise ValueError("Evaluation progress belongs to different inputs or parameters; clean and start again")
+        if final_result_path.is_file():
+            print(f"[resume] Chunk already complete: {final_result_path}")
+            return
+    else:
+        if final_result_path.exists():
+            raise FileExistsError(f"{final_result_path} exists; use --resume or clean the output directory")
+        if progress_manifest.exists():
+            raise FileExistsError(f"{progress_manifest} exists; use --resume or clean the output directory")
+        progress_manifest.parent.mkdir(parents=True, exist_ok=True)
+        progress_manifest.write_text(json.dumps(run_identity, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    # load model
+    device = torch.device(int(args.gpu_id))
+    args.options = []
+
+    seed = 42
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    cudnn.benchmark = False
+    cudnn.deterministic = True
+
+    # set after init_distributed_mode() to only log on master.
+
+    model_name = get_model_name_from_path(args.model_path)
+    load_kwargs = {}
+    if args.closs is not None:
+        load_kwargs['closs'] = args.closs
+    load_kwargs['vision_tower'] = args.vision_tower
+    load_kwargs['device_map'] = None
+    
+    tokenizer, model, processor, context_len = load_pretrained_model(args.model_path, None, model_name, **load_kwargs)
+    model = model.to(device)
+    model.to(dtype=torch.float16)
+    text_sync_id = model.vocab_size
+    time_token_start = model.vocab_size + 1
+    time_token_end = model.vocab_size + model.config.time_vocab_size
+    time_sync_id = time_token_start + model.get_model().time_tokenizer.vocab['<sync>']
+    time_sep_id = time_token_start + model.get_model().time_tokenizer.vocab['<sep>']
+    trace_token_spec = TraceTokenSpec(
+        text_vocab_size=model.vocab_size,
+        time_vocab=model.get_model().time_tokenizer.vocab,
+        score_vocab_size=model.config.score_vocab_size,
+    )
+    
+    # Check and print closs status
+    closs_status = getattr(model.config, 'closs', False)
+    has_closs_tokens = hasattr(model, 'closs_tokens') or hasattr(model.get_model(), 'closs_tokens')
+    print(f"Model Config CLOSS: {closs_status}")
+    print(f"Model has closs_tokens: {has_closs_tokens}")
+    
+    conv_mode = 'llama_2'
+    print('Initialization Finished')
+
+    # load data
+    video_path = args.video_path
+    anno_path = args.anno_path
+    anno_data = load_data(args, anno_path, split=args.split)
+    print('Load Annotation Finished')
+
+    # Deduplicate by video path to avoid redundant inference
+    unique_data = {}
+    # Preserve original order.
+    unique_list = []
+    seen_vids = set()
+    
+    print(f"Before deduplication: {len(anno_data)} samples")
+    
+    for item in anno_data:
+        # Prefer video_path / video as the dedup key; fall back to image_id when it looks like a path.
+        vid = item.get('video_path') or item.get('video')
+        
+        if not vid:
+            iid = item.get('image_id')
+            if iid and isinstance(iid, str) and ('.mp4' in iid or '.avi' in iid or '/' in iid):
+                vid = iid
+            else:
+                # When image_id is not a path (e.g. a numeric id) we still use it as the
+                # dedup key. It may not perfectly deduplicate but there is no better key.
+                vid = iid
+        
+        # Keep the item if vid is set and unseen.
+        if vid:
+            if vid not in seen_vids:
+                seen_vids.add(vid)
+                unique_list.append(item)
+        else:
+            # Extremely rare: neither video_path nor image_id is set. Keep the item to be safe.
+            unique_list.append(item)
+    
+    if len(unique_list) < len(anno_data):
+        print(f"Deduplicated data: {len(anno_data)} -> {len(unique_list)} unique videos")
+        anno_data = unique_list
+    else:
+        print(f"No duplicates found (based on video path). Total: {len(anno_data)}")
+
+    if args.sample_num > 0:
+        # sample part data to evaluate
+        anno_data = random.sample(anno_data, args.sample_num)
+    
+    # Data chunking for parallel evaluation
+    if args.num_chunks > 1:
+        total_len = len(anno_data)
+        chunk_size = ceil(total_len / args.num_chunks)
+        start_idx = args.chunk_idx * chunk_size
+        end_idx = min((args.chunk_idx + 1) * chunk_size, total_len)
+        anno_data = anno_data[start_idx:end_idx]
+        print(f"Processing chunk {args.chunk_idx}/{args.num_chunks} (indices {start_idx}-{end_idx}, {len(anno_data)} samples)")
+
+    results_by_key = {}
+    if progress_path.exists() and not args.resume:
+        raise FileExistsError(f"{progress_path} exists; use --resume or clean the output directory")
+    if args.resume and progress_path.is_file():
+        with progress_path.open('r', encoding='utf-8') as handle:
+            for line in handle:
+                try:
+                    previous = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(previous, dict):
+                    results_by_key[result_item_key(previous)] = previous
+        print(f"[resume] Reusing {len(results_by_key)}/{len(anno_data)} completed videos")
+    pending_data = [item for item in anno_data if result_item_key(item) not in results_by_key]
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_handle = progress_path.open('a', encoding='utf-8', buffering=1)
+    
+    # Concurrent tqdm bars: one position per chunk.
+    tqdm_position = int(getattr(args, 'tqdm_position', -1))
+    if tqdm_position < 0:
+        tqdm_position = int(getattr(args, 'chunk_idx', 0))
+
+    for item in tqdm(pending_data, position=tqdm_position, leave=True, dynamic_ncols=True, desc=f"Eval chunk {args.chunk_idx}"):
+        vname = item.get("image_id")
+        # Try the relative path first.
+        vid_path = os.path.join(video_path, vname)
+        if not os.path.exists(vid_path):
+            # If `video_path` is already absolute, use it directly.
+            if os.path.exists(item.get("video_path", "")):
+                vid_path = item.get("video_path")
+            else:
+                # Otherwise, join `video_path` to the configured root.
+                vid_path = os.path.join(video_path, item.get("video_path", ""))
+                if not os.path.exists(vid_path):
+                    print(f"Video not found: {vname} / {item.get('video_path')}")
+                    continue
+
+        duration = item.get("duration")
+        # Probe the video if duration is missing.
+        if duration is None:
+            try:
+                vr = decord.VideoReader(vid_path, ctx=decord.cpu(0))
+                duration = len(vr) / vr.get_avg_fps()
+            except Exception as e:
+                print(f"Failed to read duration for {vid_path}: {e}")
+                duration = 10000.0 # Fallback
+
+        # Read coarse proposals from Stage-1 output.
+        source_segments = []
+        if "model_inference" in item and "segment" in item["model_inference"]:
+            source_segments = item["model_inference"]["segment"]
+        else:
+            print(f"Skip {vid_path}: missing `model_inference.segment`")
+            continue
+
+        model_inference_segments = []
+        model_inference_responses = []
+        raw_generations = []
+        is_fake = (item.get('type') == 'fake')
+
+        for segment in source_segments:
+            if not segment:
+                continue
+            
+            s, e = segment
+            center = (s + e) / 2
+            length = e - s
+            expand_ratio = 1.0
+            new_len = length * expand_ratio
+            half_len = new_len / 2
+            
+            win_s = max(0.0, center - half_len)
+            win_e = min(duration, center + half_len)
+            
+            # Window must be valid.
+            if win_e <= win_s:
+                print(f"Invalid window for {vid_path}: {win_s}-{win_e}")
+                model_inference_segments.append([-99, -99])
+                raw_generations.append({"status": FORMAT_FAILURE, "failure_reasons": ["invalid_proposal_window"], "raw_token_ids": []})
+                continue
+
+            try:
+                tensor, video_timestamps = process_video_ref_split(
+                    vid_path, 
+                    processor, 
+                    model.config.image_aspect_ratio, 
+                    bnd_frames=args.bnd_frames,
+                    seg_frames=args.seg_frames,
+                    bnd_ratio=args.bnd_ratio,
+                    start_time=win_s, 
+                    end_time=win_e
+                )
+                
+                if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                    print(f"Warning: Tensor contains NaN or Inf for video {vid_path}")
+                    raise ValueError("NaN/Inf tensor")
+
+                tensor = tensor.to(dtype=torch.float16, device='cuda', non_blocking=True)
+
+                default_mm_token = DEFAULT_MMODAL_TOKEN["VIDEO"]
+                tensor = [tensor]
+                video_timestamps = [video_timestamps]
+                heads = [1]
+                modal_list = ['video']
+
+
+                final_prompt = copy.deepcopy(prompt)
+                question = default_mm_token + "\n" + final_prompt
+
+
+                conv = conv_templates[conv_mode].copy()
+                conv.append_message(conv.roles[0], question)
+                conv.append_message(conv.roles[1], None)
+                cur_prompt = conv.get_prompt()
+                
+                cur_prompt += '<sync>'
+
+                input_ids = tokenizer_MMODAL_token_all(cur_prompt, tokenizer, return_tensors='pt').unsqueeze(0).to('cuda')
+                attention_masks = input_ids.ne(tokenizer.pad_token_id).long().cuda()
+
+                stop_str = conv.sep if conv.sep_style in [SeparatorStyle.SINGLE] else conv.sep2
+                keywords = [stop_str]
+                # stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
+                do_sample = False
+
+                with torch.inference_mode():
+                    output_ids = model.generate(
+                        input_ids,
+                        attention_mask=attention_masks,
+                        images_or_videos=tensor,
+                        modal_list=modal_list,
+                        do_sample=do_sample,
+                        temperature=0.2 if do_sample else 0.0,
+                        max_new_tokens=args.max_new_tokens,
+                        use_cache=True,
+                        pad_token_id=tokenizer.eos_token_id,
+                        video_timestamps=video_timestamps,
+                        heads=heads
+                    )
+
+                raw_output_ids = [int(x) for x in output_ids[0].detach().cpu().tolist()]
+                strict_parse = parse_trace_tokens(
+                    raw_output_ids,
+                    trace_token_spec,
+                    lambda ids: safe_decode_text(tokenizer, ids),
+                    window_duration=win_e - win_s,
+                )
+                raw_generations.append(strict_parse.as_dict())
+                # Training rewards and evaluation must consume the same strict
+                # parser semantics. Preserve every valid event rather than
+                # reparsing and silently keeping only the first timestamp.
+                if strict_parse.status == VALID_EVENT:
+                    for rel_s, rel_e in strict_parse.segments:
+                        model_inference_segments.append([win_s + rel_s, win_s + rel_e])
+                        model_inference_responses.append(strict_parse.caption)
+            except Exception:
+                traceback.print_exc()
+                print(f'generate for video {vid_path} segment {segment} failed')
+                raw_generations.append({"status": FORMAT_FAILURE, "failure_reasons": ["generation_exception"], "raw_token_ids": []})
+
+        # Build the output item.
+        final_output = item.copy()
+        # Keep the original annotations untouched.
+        final_output['annotations'] = item.get("annotations", [])
+        
+        valid_segments = model_inference_segments
+        valid_responses = model_inference_responses
+        statuses = set(entry["status"] for entry in raw_generations)
+        model_inference = {
+            "segment": valid_segments,
+            "response": valid_responses,
+            "raw_generation": raw_generations,
+            "parse_status": [entry["status"] for entry in raw_generations],
+        }
+
+        if VALID_EVENT in statuses:
+            model_inference["type"] = "fake"
+        elif statuses == {VALID_NO_EVENT}:
+            model_inference["type"] = "real"
+            model_inference["decision_status"] = "semantic_no_event"
+        else:
+            # Invalid output is not a semantic real prediction.
+            model_inference["type"] = "invalid"
+            model_inference["decision_status"] = "format_failure"
+        if VALID_EVENT in statuses:
+            model_inference["decision_status"] = "semantic_event"
+            
+        final_output['model_inference'] = model_inference
+
+        # Make sure video_path is set on the output.
+        if 'video_path' not in final_output:
+             final_output['video_path'] = item.get("image_id")
+        
+        results_by_key[result_item_key(final_output)] = final_output
+        progress_handle.write(json.dumps(final_output, ensure_ascii=False) + '\n')
+
+    progress_handle.close()
+    results = [results_by_key[result_item_key(item)] for item in anno_data if result_item_key(item) in results_by_key]
+    save_result(args, args.output_dir, results, args.split, format=True)
+
+    total_time = time.time() - eval_start_time
+    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    print('Evaluate time {}'.format(total_time_str))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--anno_path', type=str, default='data/YouCook2-BB/YouCook2_asr_denseCap/')
+    parser.add_argument('--video_path', type=str, default='data/YouCook2-BB/YouCook2_asr_denseCap/youcook2_6fps_224/')
+    parser.add_argument('--task',
+                        default='dvc')  # dvc for dense video captioning; tvg for temporal video grounding; vhd for video highlight detection
+    parser.add_argument('--dataset', default='youcook')
+    parser.add_argument('--output_dir', default='debug')
+    parser.add_argument('--split', default='val')
+    parser.add_argument('--num_frames', type=int, default=8)
+    parser.add_argument('--top_p', type=float, default=0.8)
+    parser.add_argument('--temperature', type=float, default=1)
+    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--max_new_tokens', type=int, default=512)
+    parser.add_argument('--gpu_id', default='0')
+    parser.add_argument('--timestamp', action='store_true', help='input the gt/predicted timestamps to the model')
+    parser.add_argument('--timestamp_file', type=str, default='', help='the predcited timestamps file')
+    parser.add_argument('--debug', action='store_true', help='the debug mode will only use 10 data samples')
+    parser.add_argument('--prompt_file', default='prompts/dvc_description.txt')
+    parser.add_argument('--model_path',
+                        default='ckpt/vtgllm/train_stage2_llama2_7b_time64k_valley72k_bz32_f96_epoch3_open_i_instruct_qformer_lora_bind_time_ws32_mfp96_mtl2048/20231026060/checkpoint_2.pth')
+    parser.add_argument('--vision_tower', type=str, default=None, help='Override the vision tower path saved in model config')
+    parser.add_argument('--sample_num', type=int, default=-1, help='fast inference by sampling N instances to evaluate')
+    parser.add_argument('--num_chunks', type=int, default=1)
+    parser.add_argument('--chunk_idx', type=int, default=0)
+    parser.add_argument('--anno_file', type=str, default=None, help='Direct path to annotation file')
+    parser.add_argument('--quiet_non_master', action='store_true', help='Only chunk0 prints normal logs (progress bars still show)')
+    parser.add_argument('--tqdm_position', type=int, default=-1, help='tqdm position for multi-progress display; default uses chunk_idx')
+    parser.add_argument('--resume', action='store_true', help='Resume this evaluation chunk from its per-video JSONL progress')
+    
+    # Refinement-specific arguments.
+    parser.add_argument('--bnd_ratio', type=float, default=0.2, help='Ratio of boundary region (each side).')
+    parser.add_argument('--bnd_frames', type=int, default=16, help='Number of frames to sample from each boundary region.')
+    parser.add_argument('--seg_frames', type=int, default=8, help='Number of frames to sample from the event region.')
+    parser.add_argument('--closs', type=lambda x: (str(x).lower() == 'true'), default=None, help='Whether to use closs tokens')
+
+    args = parser.parse_args()
+    main(args)
