@@ -273,6 +273,15 @@ def merge(args: argparse.Namespace, proposals: list[dict], world: int) -> None:
         video_name = source["video_path"]
         results = [all_results[f"{video_name}::{index}"] for index, _ in enumerate(proposal_segments(source))]
         for result in results:
+            # 续跑时也按当前解析规则重算已有原文，避免旧的格式判定污染最终指标。
+            proposal = result["proposal"]
+            parsed = parse_answer(result["raw_response"], proposal[1] - proposal[0])
+            result["status"] = parsed["status"]
+            result["explanation"] = parsed["explanation"]
+            result["segment"] = (
+                [proposal[0] + value for value in parsed["relative_segment"]]
+                if parsed["relative_segment"] is not None else None
+            )
             counts[result["status"]] += 1
             if result["status"] in {"format_error", "range_error"}:
                 outcome = "invalid_positive" if result["target_kind"] == "fake" else "invalid_negative"

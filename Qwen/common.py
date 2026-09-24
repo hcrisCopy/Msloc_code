@@ -122,6 +122,10 @@ def clip_timestamps_path(clip: Path) -> Path:
 
 def parse_answer(raw: str, duration: float) -> dict:
     text = raw.strip()
+    # Qwen3.5 关闭 thinking 时，ms-swift 仍会在答案前放入这个空的非思考前缀。
+    non_thinking_prefix = "<think>\n\n</think>\n\n"
+    if text.startswith(non_thinking_prefix):
+        text = text[len(non_thinking_prefix):].strip()
     real_match = REAL_PATTERN.fullmatch(text)
     if real_match is not None:
         return {"status": "real", "relative_segment": None, "explanation": real_match["explanation"]}
