@@ -1,0 +1,20 @@
+=== FAKE ===
+Use the verified fake label and interval above. Include only points visible in the clip; do not invent details. Use the explanation guidance above for the Explanation line. The final line should be Interval: [start, end] with the verified interval.
+
+If the answer is partly written, keep its existing text and guide the remaining text toward that target. An earlier explanation that misses the forgery does not change the verified label. If an interval number has already begun incorrectly, preserve its written digits and use the remaining digits to move it toward the verified boundary while keeping a valid interval.
+
+Examples of partly written answers (the example values are unrelated to this clip; \n means a line break):
+1. Verified [10, 20]; written "Explanation: The reflection moves out of sync.\n"; complete with "Interval: [10, 20]".
+2. Verified [10, 20]; written "Explanation: The reflection moves out of sync.\nInterval: [10, "; complete with "20]".
+3. Verified [10, 20]; written "Explanation: The reflection moves out of sync.\nInterval: [10, 1"; complete with "9]". The end becomes 19, closer to 20 than 11.
+4. Verified [10, 20]; written "Explanation: The reflection moves out of sync.\nInterval: [9, "; complete with "20]". The start is already fixed.
+5. Verified [4, 8]; written "Explanation: A person walks past the camera.\n"; complete with "Interval: [4, 8]" despite the inaccurate explanation.
+
+=== REAL ===
+Use the verified real label above. For three sentences, <what is visible at the beginning> should describe an ordinary visible beginning, <main visible event> should describe the main ordinary action, and <what is visible at the end> should describe the visible ending. For one sentence, <main visible event> should describe the main ordinary action. Use only what is visible in the clip. The final line should be Real.
+
+If the answer is partly written, keep its existing text. An earlier explanation that mistakenly suggests an anomaly does not change the verified label: when the final line is still unwritten, make it Real.
+
+Examples of partly written answers (the descriptions are unrelated to this clip; \n means a line break):
+1. Written "Explanation: A person crosses the room.\n"; complete with "Real".
+2. Written "Explanation: The reflection looks unusual.\n"; complete with "Real" despite the inaccurate explanation.

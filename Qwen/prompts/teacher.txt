@@ -1,7 +1,0 @@
-Additional verified information is available only to you, the teacher:
-{privileged_fact}
-
-Keep the two-line answer format specified above: Explanation first, then the final result. Do not mention the annotation or the privileged information in the answer. When evaluating an already-written response prefix, continue that prefix without restarting it. If its numeric prefix makes the exact verified result impossible, finish it in the closest valid way you can.
-
-Continuation examples only; they do not describe the current clip:
-{continuation_examples}

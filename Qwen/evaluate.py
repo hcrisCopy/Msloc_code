@@ -15,7 +15,7 @@ import torch
 import torch.distributed as dist
 from tqdm import tqdm
 
-from common import clip_name, make_clip, parse_answer, proposal_segments, read_records
+from common import clip_name, clip_timestamps_path, make_clip, parse_answer, proposal_segments, read_records
 from opsd_common import proposal_target, student_message, teacher_message
 
 
@@ -39,8 +39,8 @@ def arguments() -> argparse.Namespace:
 
 
 def validate(args: argparse.Namespace) -> tuple[list[dict], list[dict]]:
-    if args.frames <= 0 or args.max_new_tokens <= 0:
-        raise ValueError("frames 和 max-new-tokens 必须大于 0")
+    if args.frames != 40 or args.max_new_tokens <= 0:
+        raise ValueError("Qwen 输入 frames 必须是 40，max-new-tokens 必须大于 0")
     if not Path(args.model).is_dir():
         raise FileNotFoundError(args.model)
     if args.adapter != "none" and not Path(args.adapter).is_dir():
@@ -86,6 +86,7 @@ def launch(args: argparse.Namespace) -> None:
         "teacher_prompt_text": Path(args.teacher_prompt_file).read_text(encoding="utf-8") if args.teacher_prompt_file else None,
         "devices": args.devices,
         "frames": args.frames,
+        "sampling": "trace16_8_16",
         "max_new_tokens": args.max_new_tokens,
     }
     if args.resume == "auto":
@@ -153,9 +154,11 @@ def run_worker(args: argparse.Namespace) -> None:
             tasks.append((task_id, video_name, relative_video, index, segment))
     tasks = [task for index, task in enumerate(tasks) if index % world == rank and task[0] not in completed]
     if tasks:
+        from trace_video_template import register_trace_video_template
         from swift import get_template
         from swift.infer_engine import InferRequest, RequestConfig, TransformersEngine
 
+        register_trace_video_template()
         adapters = [] if args.adapter == "none" else [args.adapter]
         engine = TransformersEngine(
             args.model,
@@ -177,12 +180,14 @@ def run_worker(args: argparse.Namespace) -> None:
                 make_clip(Path(args.video_root) / relative_video, proposal, clip, args.frames)
                 duration = proposal[1] - proposal[0]
                 message = student_message(prompt, duration)
-                target = proposal_target(proposal, annotations[video_name]) if teacher_prompt else None
+                # 真值只用于教师特权提示词和事后审计；普通学生请求不包含它。
+                target = proposal_target(proposal, annotations[video_name])
                 if teacher_prompt:
-                    message = teacher_message(message, teacher_prompt, target, duration)
+                    message = teacher_message(message, teacher_prompt, target, mode="precheck")
                 request = InferRequest(
                     messages=[{"role": "user", "content": message}],
                     videos=[str(clip)],
+                    chat_template_kwargs={"nframes": 40},
                 )
                 response = engine.infer([request], request_config=config)[0].choices[0].message.content
                 raw = "" if response is None else str(response)
@@ -196,10 +201,13 @@ def run_worker(args: argparse.Namespace) -> None:
                     "proposal_index": index,
                     "proposal": list(proposal),
                     "clip": str(clip),
+                    "timestamps": str(clip_timestamps_path(clip)),
                     "raw_response": raw,
                     "status": parsed["status"],
-                    "target_kind": target["kind"] if target else None,
-                    "target_relative": target["relative_segment"] if target else None,
+                    "target_kind": target["kind"],
+                    "target_relative": target["relative_segment"],
+                    "source_video_type": target["source_video_type"],
+                    "replay_bucket": target["replay_bucket"],
                     "explanation": parsed["explanation"],
                     "segment": absolute,
                 }
@@ -225,12 +233,21 @@ def merge(args: argparse.Namespace, proposals: list[dict], world: int) -> None:
         raise ValueError(f"评测不完整：期望 {len(expected)} 条，实际 {len(all_results)} 条")
     predictions = []
     counts = defaultdict(int)
+    proposal_detection = defaultdict(int)
     invalid_ids = []
     for source in proposals:
         video_name = source["video_path"]
         results = [all_results[f"{video_name}::{index}"] for index, _ in enumerate(proposal_segments(source))]
         for result in results:
             counts[result["status"]] += 1
+            if result["status"] in {"format_error", "range_error"}:
+                outcome = "invalid_positive" if result["target_kind"] == "fake" else "invalid_negative"
+            elif result["target_kind"] == "fake":
+                outcome = "true_positive" if result["status"] == "fake" else "false_negative"
+            else:
+                outcome = "false_positive" if result["status"] == "fake" else "true_negative"
+            result["proposal_detection"] = outcome
+            proposal_detection[outcome] += 1
             if result["status"] in {"format_error", "range_error"}:
                 invalid_ids.append(result["id"])
         segments = [result["segment"] for result in results if result["status"] == "fake"]
@@ -250,9 +267,13 @@ def merge(args: argparse.Namespace, proposals: list[dict], world: int) -> None:
     temporary = output / "predictions.json.tmp"
     temporary.write_text(json.dumps(predictions, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(predictions_path)
-    summary = {"counts": dict(counts), "invalid_proposal_ids": invalid_ids}
+    summary = {
+        "counts": dict(counts), "proposal_detection": dict(proposal_detection),
+        "invalid_proposal_ids": invalid_ids,
+    }
     (output / "parse_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("Parse:", dict(counts), flush=True)
+    print("Proposal detection:", dict(proposal_detection), flush=True)
     subprocess.run([
         sys.executable, "evaluate_long.py",
         "--gt_file", args.annotation,

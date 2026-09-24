@@ -256,7 +256,7 @@ hf download Qwen/Qwen3.5-4B --local-dir ../Qwen/Qwen3.5-4B
 
 ### Qwen3.5-4B 直接评测
 
-输入第一阶段测试 proposal、待检视频和 `_0119` 测试标注。每个 proposal 单独截成片段；模型先解释，最后对伪造片段给出片段内相对秒数，对真实片段输出 `Real`。程序将区间换算成原视频绝对秒数，再调用 `evaluate_long.py` 计算与 Trace 相同的指标。格式或时间范围错误会标为 `invalid`，原文和错误数量分别保存在 `predictions.json` 与 `parse_summary.json`；指标仍按 Trace 的规则将无有效定位的预测视为无伪造片段。结果在 `../MSLoc_data/Qwen/base_eval/`，包含 `metrics.json`。
+输入第一阶段测试 proposal、待检视频和 `_0119` 测试标注。沿用 Trace 的取帧方式：每个 proposal 的前 20%、中间 60%、后 20% 分别取 16、8、16 帧。片段 MP4 旁的 `.timestamps.json` 以毫秒记录每帧相对 proposal 起点的时间；`Qwen/trace_video_template.py` 将它转换成 Qwen3.5 所需的帧索引和 FPS，避免非均匀帧被当成匀速视频。SFT、教师预检、OPSD 和正式评测共用这一设置；已有均匀 40 帧数据和 adapter 需要重新生成与训练。模型先解释，最后对伪造片段给出片段内相对秒数，对真实片段输出 `Real`。程序将区间换算成原视频绝对秒数，再调用 `evaluate_long.py` 计算与 Trace 相同的指标。格式或时间范围错误单独记为 `invalid`；`predictions.json` 保留原文与逐 proposal 的真假判定，`parse_summary.json` 汇总误报、漏报和格式错误。fake 视频中未命中 GT 的 proposal 按片段记为 real；整视频的 `metrics.json` 仍使用原视频 GT。结果在 `../MSLoc_data/Qwen/base_eval/`。
 
 ```bash
 python Qwen/evaluate.py \
@@ -268,7 +268,7 @@ python Qwen/evaluate.py \
   --prompt-file Qwen/prompts/student.txt \
   --output ../MSLoc_data/Qwen/base_eval \
   --devices 0,1,2,3,4,5,6,7 \
-  --frames 16 \
+  --frames 40 \
   --max-new-tokens 256 \
   --resume none \
   --clean
@@ -285,7 +285,7 @@ python Qwen/prepare_sft.py \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --prompt-file Qwen/prompts/student_sft.txt \
   --output-dir ../MSLoc_data/Qwen/sft_data \
-  --frames 16 \
+  --frames 40 \
   --clean
 ```
 
@@ -300,7 +300,7 @@ python Qwen/train_sft.py \
   --epochs 2 \
   --global-batch-size 8 \
   --learning-rate 1e-4 \
-  --max-length 4096 \
+  --max-length 8192 \
   --save-steps 100 \
   --resume none \
   --clean
@@ -320,7 +320,7 @@ python Qwen/evaluate.py \
   --prompt-file Qwen/prompts/student.txt \
   --output ../MSLoc_data/Qwen/sft_eval \
   --devices 0,1,2,3,4,5,6,7 \
-  --frames 16 \
+  --frames 40 \
   --max-new-tokens 256 \
   --resume none \
   --clean
@@ -328,7 +328,7 @@ python Qwen/evaluate.py \
 
 ### Qwen3.5-4B OPSD：教师评测与训练
 
-先在训练 proposal 上用相同的 SFT adapter、视频和学生提示词各做一次完整生成评测。教师额外收到当前 proposal 的片段内 GT 区间，或“此片段正常”的文字真值；教师与学生都先解释、后输出 `Real` 或 `Interval`。这一步只用于验证教师，最终测试仍由不看真值的学生完成。两份评测分别写入 `../MSLoc_data/Qwen/opsd_student_precheck/` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck/`。
+先在训练 proposal 上用相同的 SFT adapter、视频和学生提示词各做一次完整生成评测。预检教师沿用学生的任务说明、格式要求与示例，只额外收到当前 proposal 的片段内 GT 区间或“此片段 real”的文字真值，以及异常对象与类别。提示词按一或三句解释明确这些类别对应的内容，不提供标注原句。这一步用于验证初始教师，最终测试仍由不看真值的学生完成。两份评测分别写入 `../MSLoc_data/Qwen/opsd_student_precheck/` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck/`。
 
 ```bash
 python Qwen/evaluate.py \
@@ -340,7 +340,7 @@ python Qwen/evaluate.py \
   --prompt-file Qwen/prompts/student.txt \
   --output ../MSLoc_data/Qwen/opsd_student_precheck \
   --devices 0,1,2,3,4,5,6,7 \
-  --frames 16 \
+  --frames 40 \
   --max-new-tokens 256 \
   --resume none \
   --clean
@@ -354,10 +354,10 @@ python Qwen/evaluate.py \
   --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --prompt-file Qwen/prompts/student.txt \
-  --teacher-prompt-file Qwen/prompts/teacher.txt \
+  --teacher-prompt-file Qwen/prompts/teacher_precheck.txt \
   --output ../MSLoc_data/Qwen/opsd_teacher_precheck \
   --devices 0,1,2,3,4,5,6,7 \
-  --frames 16 \
+  --frames 40 \
   --max-new-tokens 256 \
   --resume none \
   --clean
@@ -373,7 +373,7 @@ python Qwen/check_teacher.py \
   --clean
 ```
 
-把全部训练 proposal 做成 OPSD 数据，异常片段使用与 SFT 一致的单区间 GT，未命中 GT 的片段给教师正常真值。学生消息完全沿用 `Qwen/prompts/student.txt`；异常教师追加 GT、标注类别和可见要点，正常教师改用中性措辞描述普通事件。两种教师输入都使用原片段视频和相同的两行输出格式，不拼接额外视觉内容。数据、审计记录和片段写入 `../MSLoc_data/Qwen/opsd_data/`。
+把全部训练 proposal 做成 OPSD 数据，异常片段使用与 SFT 一致的单区间 GT；fake 视频中未命中 GT 的 proposal 按 Trace 记为近邻难负例或误报，教师对这些片段给 real 真值。真实视频的误报也保留。学生消息沿用 `Qwen/prompts/student.txt`；教师在相同视频上额外看到片段真假、异常片段内相对 GT，以及标注的时空伪造类别、`obj`、对象 `bnd_class` 和 `bnd_sub_class`、起止边界各自的 `bnd_class`。提示词说明这些类别对应解释中的哪一句，但不提供标注原句。`teacher_precheck.txt` 用于完整生成评测，`teacher_opsd.txt` 用于学生在线生成后的逐 token 蒸馏；两者分别写真假指令，训练器将学生已经生成的 token 接在教师输入之后。数据、审计记录和片段写入 `../MSLoc_data/Qwen/opsd_data/`。
 
 ```bash
 python Qwen/prepare_opsd.py \
@@ -381,13 +381,14 @@ python Qwen/prepare_opsd.py \
   --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --student-prompt-file Qwen/prompts/student.txt \
-  --teacher-prompt-file Qwen/prompts/teacher.txt \
+  --teacher-precheck-prompt-file Qwen/prompts/teacher_precheck.txt \
+  --teacher-opsd-prompt-file Qwen/prompts/teacher_opsd.txt \
   --output-dir ../MSLoc_data/Qwen/opsd_data \
-  --frames 16 \
+  --frames 40 \
   --clean
 ```
 
-从 SFT 的 LoRA 继续训练。使用 ms-swift GKD/OPSD：学生在线生成，当前 LoRA 权重读取教师提示词并提供分布监督；教师评测未通过时程序会拒绝训练。视频 rollout 先使用 Transformers 路径，避免多模态 vLLM 的 token 对齐问题。单卡时只把 `--devices` 改成 `0`；断点继续用 `--resume auto` 并去掉 `--clean`。权重与训练曲线写入 `../MSLoc_data/Qwen/opsd/`。
+从 SFT 的 LoRA 继续训练。使用 ms-swift GKD/OPSD：学生在线生成；同一当前 LoRA 权重在教师特权提示词下停止梯度并提供分布监督，学生更新后教师权重也随之更新。初始教师评测未通过时程序会拒绝训练。视频 rollout 使用 Transformers 路径。单卡时只把 `--devices` 改成 `0`；断点继续用 `--resume auto` 并去掉 `--clean`，程序会核对原训练参数和输入文件。权重、训练曲线及续训配置写入 `../MSLoc_data/Qwen/opsd/`。
 
 ```bash
 python Qwen/train_opsd.py \
@@ -400,7 +401,7 @@ python Qwen/train_opsd.py \
   --epochs 1 \
   --global-batch-size 8 \
   --learning-rate 2e-5 \
-  --max-length 4096 \
+  --max-length 8192 \
   --max-completion-length 256 \
   --save-steps 100 \
   --resume none \
@@ -419,7 +420,7 @@ python Qwen/evaluate.py \
   --prompt-file Qwen/prompts/student.txt \
   --output ../MSLoc_data/Qwen/opsd_eval \
   --devices 0,1,2,3,4,5,6,7 \
-  --frames 16 \
+  --frames 40 \
   --max-new-tokens 256 \
   --resume none \
   --clean

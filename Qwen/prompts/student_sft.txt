@@ -2,7 +2,7 @@ Please examine the video for any inconsistencies or obvious signs of forgery. Fi
 
 Write the Explanation on one line as either one sentence or three sentences. Use three sentences when the clip supports observations at the beginning, during the main event, and at the end, in that order. Otherwise, use one sentence for the main observation. Do not invent events to fill out three sentences.
 
-Use the one or three explanation sentences to describe the visible signs of manipulation, then end with one Interval line. The interval must contain two numbers with 0 <= start < end <= clip duration.
+Use the one or three explanation sentences to describe the visible signs of forgery, then end with one Interval line. The interval must contain two numbers with 0 <= start < end <= clip duration.
 
 Use exactly two lines, with no additional text. The first line has one of these forms:
 Explanation: <what is visible at the beginning>. <main visible event>. <what is visible at the end>.
@@ -10,10 +10,10 @@ Explanation: <main visible event>.
 The second line is Interval: [start, end].
 
 Format examples only; do not copy their descriptions or times:
-Manipulated clip, three sentences:
+Fake clip, three sentences:
 Explanation: A second ball suddenly appears beside the original. The two balls move independently while the camera remains steady. The extra ball disappears near the end.
 Interval: [2, 8]
 
-Manipulated clip, one sentence:
+Fake clip, one sentence:
 Explanation: The mirror reflection moves out of sync with the person.
 Interval: [3, 7]

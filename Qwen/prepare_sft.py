@@ -8,7 +8,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from common import clip_name, explanation, gt_segments, make_clip, number, overlap, proposal_segments, read_records, target_text
+from common import clip_name, clip_timestamps_path, explanation, gt_segments, make_clip, number, overlap, proposal_segments, read_records, target_text
 
 
 def main() -> None:
@@ -21,8 +21,8 @@ def main() -> None:
     parser.add_argument("--frames", type=int, required=True)
     parser.add_argument("--clean", action="store_true")
     args = parser.parse_args()
-    if args.frames <= 0:
-        raise ValueError("--frames 必须大于 0")
+    if args.frames != 40:
+        raise ValueError("Qwen 输入固定为 40 帧")
     output_dir = Path(args.output_dir)
     if not output_dir.resolve().is_relative_to(Path("../MSLoc_data/Qwen").resolve()):
         raise ValueError("训练数据输出必须位于 ../MSLoc_data/Qwen/ 下")
@@ -72,6 +72,7 @@ def main() -> None:
                         {"role": "assistant", "content": target_text(caption, relative)},
                     ],
                     "videos": [str(clip)],
+                    "chat_template_kwargs": {"nframes": 40},
                 }
                 audit = {
                     "video_path": video_name,
@@ -80,6 +81,7 @@ def main() -> None:
                     "target_absolute": list(clipped),
                     "target_relative": list(relative),
                     "clip": str(clip),
+                    "timestamps": str(clip_timestamps_path(clip)),
                     "explanation": caption,
                     "overlapping_gt_count": len(hits),
                 }

@@ -2,26 +2,26 @@ Please examine the video for any inconsistencies or obvious signs of forgery. Fi
 
 Write the Explanation on one line as either one sentence or three sentences. Use three sentences when the clip supports observations at the beginning, during the main event, and at the end, in that order. Otherwise, use one sentence for the main observation. Do not invent events to fill out three sentences.
 
-If the clip is manipulated, use the one or three explanation sentences to describe the visible signs of manipulation, then end with one Interval line. If the clip is normal, describe ordinary visible events in one or three sentences, then end with Real. The interval must contain two numbers with 0 <= start < end <= clip duration.
+If the clip is fake, use the one or three explanation sentences to describe the visible signs of forgery, then end with one Interval line. The interval must contain two numbers with 0 <= start < end <= clip duration. If the clip is real, describe ordinary visible events in one or three sentences, then end with Real.
 
 Use exactly two lines, with no additional text. The first line has one of these forms:
 Explanation: <what is visible at the beginning>. <main visible event>. <what is visible at the end>.
 Explanation: <main visible event>.
-The second line is exactly Real for a normal clip, or Interval: [start, end] for a manipulated clip.
+The second line is exactly Real for a real clip, or Interval: [start, end] for a fake clip.
 
 Format examples only; do not copy their descriptions or times:
-Manipulated clip, three sentences:
+Fake clip, three sentences:
 Explanation: A second ball suddenly appears beside the original. The two balls move independently while the camera remains steady. The extra ball disappears near the end.
 Interval: [2, 8]
 
-Manipulated clip, one sentence:
+Fake clip, one sentence:
 Explanation: The mirror reflection moves out of sync with the person.
 Interval: [3, 7]
 
-Normal clip, three sentences:
+Real clip, three sentences:
 Explanation: A person enters a room. They pick up a bag from the floor. They leave through the doorway.
 Real
 
-Normal clip, one sentence:
+Real clip, one sentence:
 Explanation: A person walks across the room while the camera follows steadily.
 Real

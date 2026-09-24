@@ -41,6 +41,14 @@ def main() -> None:
         raise ValueError("epochs、save-steps、max-length 和 learning-rate 必须大于 0")
     if not Path(args.model).is_dir() or not Path(args.dataset).is_file():
         raise FileNotFoundError("模型目录或训练数据不存在")
+    with Path(args.dataset).open(encoding="utf-8") as handle:
+        first = handle.readline()
+    if not first:
+        raise ValueError("SFT 数据为空")
+    sample = json.loads(first)
+    if (sample.get("chat_template_kwargs", {}).get("nframes") != 40
+            or not sample.get("videos", [""])[0].endswith("_trace16_8_16.mp4")):
+        raise ValueError("SFT 数据不是 16/8/16 版本；请重新运行 prepare_sft.py")
     output = Path(args.output)
     data_root = Path("../MSLoc_data/Qwen").resolve()
     if not output.resolve().is_relative_to(data_root):
@@ -53,12 +61,20 @@ def main() -> None:
         raise FileExistsError(f"输出目录已存在：{output}；使用 --resume auto 或 --clean")
     resume_path = checkpoint(output) if args.resume == "auto" else None
     output.mkdir(parents=True, exist_ok=True)
+    sft_config_path = output / "sft_config.json"
+    sft_config = {"model": args.model, "dataset": args.dataset, "frames": 40,
+                  "sampling": "trace16_8_16"}
+    if args.resume == "auto":
+        if json.loads(sft_config_path.read_text(encoding="utf-8")) != sft_config:
+            raise ValueError("继续 SFT 时模型、数据集和取帧配置必须与原运行一致")
+    else:
+        sft_config_path.write_text(json.dumps(sft_config, ensure_ascii=False, indent=2), encoding="utf-8")
     env = os.environ.copy()
     env.update({
         "CUDA_VISIBLE_DEVICES": ",".join(devices),
         "NPROC_PER_NODE": str(len(devices)),
         "FORCE_QWENVL_VIDEO_READER": "torchcodec",
-        "FPS_MAX_FRAMES": "16",
+        "FPS_MAX_FRAMES": "40",
         "VIDEO_MAX_TOKEN_NUM": "128",
         "WANDB_DISABLED": "true",
         "TOKENIZERS_PARALLELISM": "false",
@@ -66,6 +82,7 @@ def main() -> None:
     command = [
         "swift", "sft",
         "--model", args.model,
+        "--external_plugins", "Qwen/trace_video_template.py",
         "--dataset", args.dataset,
         "--output_dir", args.output,
         "--add_version", "false",

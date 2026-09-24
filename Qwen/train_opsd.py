@@ -1,8 +1,9 @@
-"""基于 ms-swift 4.5.3 GKD/OPSD 继续训练 SFT LoRA；教师为当前权重加文字真值。"""
+"""基于 ms-swift 4.5.3 GKD/OPSD 继续训练 SFT LoRA；教师共享学生当前权重并读取文字真值。"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -15,6 +16,14 @@ def checkpoint(output: Path) -> Path:
     if not candidates:
         raise FileNotFoundError(f"没有可继续的 OPSD checkpoint：{output}")
     return max(candidates, key=lambda path: int(path.name[11:]))
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def main() -> None:
@@ -43,6 +52,10 @@ def main() -> None:
         raise ValueError("epochs、长度、save-steps 和 learning-rate 必须大于 0")
     if not Path(args.model).is_dir() or not Path(args.adapter).is_dir() or not Path(args.dataset).is_file():
         raise FileNotFoundError("模型、SFT adapter 或 OPSD 数据不存在")
+    sft_config = json.loads((Path(args.adapter).parent / "sft_config.json").read_text(encoding="utf-8"))
+    if (sft_config["frames"] != 40 or sft_config.get("sampling") != "trace16_8_16"
+            or Path(sft_config["model"]).resolve() != Path(args.model).resolve()):
+        raise ValueError("OPSD 必须从相同模型的 16/8/16 SFT adapter 开始")
     gate_path = Path(args.teacher_gate)
     gate = json.loads(gate_path.read_text(encoding="utf-8"))
     if gate["passed"] is not True:
@@ -53,11 +66,21 @@ def main() -> None:
     if Path(student_config["model"]).resolve() != Path(args.model).resolve():
         raise ValueError("教师准入所用模型与 OPSD 模型不同")
     teacher_config = json.loads((Path(gate["teacher_eval"]) / "eval_config.json").read_text(encoding="utf-8"))
+    if (Path(teacher_config["model"]).resolve() != Path(args.model).resolve()
+            or Path(teacher_config["adapter"]).resolve() != Path(args.adapter).resolve()):
+        raise ValueError("教师准入必须使用与学生相同的 SFT 初始权重")
+    if (student_config.get("sampling") != "trace16_8_16"
+            or teacher_config.get("sampling") != "trace16_8_16"):
+        raise ValueError("OPSD 师生预检必须使用同一 16/8/16 视频取帧")
     data_config = json.loads((Path(args.dataset).parent / "data_config.json").read_text(encoding="utf-8"))
+    if data_config["frames"] != 40 or data_config.get("sampling") != "trace16_8_16":
+        raise ValueError("OPSD 数据不是 16/8/16 版本；请重新运行 prepare_opsd.py")
     if data_config["student_prompt_text"] != student_config["prompt_text"].strip():
         raise ValueError("OPSD 学生提示词与教师准入评测不一致")
-    if data_config["teacher_prompt_text"] != teacher_config["teacher_prompt_text"].strip():
-        raise ValueError("OPSD 教师提示词与教师准入评测不一致")
+    if data_config["teacher_precheck_prompt_text"] != teacher_config["teacher_prompt_text"].strip():
+        raise ValueError("OPSD 记录的教师预检提示词与教师准入评测不一致")
+    if not data_config["teacher_opsd_prompt_text"]:
+        raise ValueError("OPSD 训练教师提示词不能为空")
     for key in ("proposals", "annotation", "frames"):
         if data_config[key] != student_config[key]:
             raise ValueError(f"OPSD 数据与教师准入评测的 {key} 不一致")
@@ -77,7 +100,7 @@ def main() -> None:
         "CUDA_VISIBLE_DEVICES": ",".join(devices),
         "NPROC_PER_NODE": str(len(devices)),
         "FORCE_QWENVL_VIDEO_READER": "torchcodec",
-        "FPS_MAX_FRAMES": "16",
+        "FPS_MAX_FRAMES": str(data_config["frames"]),
         "VIDEO_MAX_TOKEN_NUM": "128",
         "WANDB_DISABLED": "true",
         "TOKENIZERS_PARALLELISM": "false",
@@ -86,6 +109,7 @@ def main() -> None:
         "swift", "rlhf",
         "--rlhf_type", "gkd",
         "--model", args.model,
+        "--external_plugins", "Qwen/trace_video_template.py",
         "--adapters", args.adapter,
         "--dataset", args.dataset,
         "--output_dir", args.output,
@@ -128,7 +152,30 @@ def main() -> None:
         "--report_to", "none",
         "--check_model", "false",
     ]
-    # 不传 teacher_model：官方动态 OPSD 会用当前 LoRA 权重加 teacher_prompt。
+    # 记录完整训练指令和输入文件，防止 --resume auto 接到不同的实验。
+    run_config = {
+        "command": command.copy(),
+        "devices": devices,
+        "model": str(Path(args.model).resolve()),
+        "adapter": str(Path(args.adapter).resolve()),
+        "dataset": str(Path(args.dataset).resolve()),
+        "dataset_sha256": file_sha256(Path(args.dataset)),
+        "teacher_gate": str(gate_path.resolve()),
+        "teacher_gate_sha256": file_sha256(gate_path),
+        "data_config": data_config,
+        "sft_config": sft_config,
+    }
+    run_config_path = output / "opsd_config.json"
+    if args.resume == "auto":
+        previous_config = json.loads(run_config_path.read_text(encoding="utf-8"))
+        if previous_config != run_config:
+            raise ValueError("继续 OPSD 时训练参数、设备、数据、教师准入和 SFT adapter 路径必须与原运行一致")
+    else:
+        temporary_config = run_config_path.with_suffix(".json.tmp")
+        temporary_config.write_text(json.dumps(run_config, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary_config.replace(run_config_path)
+
+    # 不传 teacher_model：同一模型在教师特权提示词下停止梯度，随后与学生一起更新 LoRA。
     if resume_path:
         command += ["--resume_from_checkpoint", str(resume_path)]
     print("OPSD:", " ".join(command), flush=True)

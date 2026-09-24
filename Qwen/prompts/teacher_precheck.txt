@@ -1,0 +1,5 @@
+=== FAKE ===
+Use the verified fake label and interval above. Include only points visible in the clip; do not invent details.
+
+=== REAL ===
+Use the verified real label above. For three sentences, <what is visible at the beginning> should describe an ordinary visible beginning, <main visible event> should describe the main ordinary action, and <what is visible at the end> should describe the visible ending. For one sentence, <main visible event> should describe the main ordinary action. Use only what is visible in the clip.

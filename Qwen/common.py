@@ -100,7 +100,11 @@ def target_text(captions: list[str], relative: tuple[float, float]) -> str:
 
 
 def clip_name(index: int, segment: tuple[float, float]) -> str:
-    return f"proposal_{index:05d}_{segment[0]:.6f}_{segment[1]:.6f}.mp4"
+    return f"proposal_{index:05d}_{segment[0]:.6f}_{segment[1]:.6f}_trace16_8_16.mp4"
+
+
+def clip_timestamps_path(clip: Path) -> Path:
+    return clip.with_suffix(".timestamps.json")
 
 
 def parse_answer(raw: str, duration: float) -> dict:
@@ -122,24 +126,84 @@ def parse_answer(raw: str, duration: float) -> dict:
 
 
 def make_clip(video: Path, segment: tuple[float, float], output: Path, frames: int) -> None:
-    """精确截取 proposal，均匀抽帧成短视频；已有片段供断点继续复用。"""
-    if output.is_file():
+    """参考 Trace/trace/mm_utils.py 的 16/8/16 取帧，另存片段内真实时间戳。"""
+    if frames != 40:
+        raise ValueError("Qwen 输入固定为 40 帧")
+    timestamps_path = clip_timestamps_path(output)
+    if output.is_file() and timestamps_path.is_file():
         if output.stat().st_size == 0:
             raise RuntimeError(f"已有片段为空：{output}")
+        from torchcodec.decoders import VideoDecoder
+
+        if VideoDecoder(str(output)).metadata.num_frames != 40:
+            raise ValueError(f"已有片段不是 40 帧：{output}")
+        saved = json.loads(timestamps_path.read_text(encoding="utf-8"))
+        if (saved["sampling"] != "trace16_8_16" or saved["proposal"] != list(segment)
+                or len(saved["relative_milliseconds"]) != 40):
+            raise ValueError(f"已有片段的采样元数据与 proposal 不一致：{timestamps_path}")
         return
     if not video.is_file():
         raise FileNotFoundError(video)
+    import numpy as np
+    from torchcodec.decoders import VideoDecoder
+
+    decoder = VideoDecoder(str(video))
+    total = decoder.metadata.num_frames
+    fps = decoder.metadata.average_fps
+    if total is None or total <= 0 or fps is None or not math.isfinite(fps) or fps <= 0:
+        raise ValueError(f"视频帧数或帧率无效：{video}")
+    start = max(0.0, segment[0])
+    end = min((total - 1) / fps, segment[1])
+    if end <= start:
+        raise ValueError(f"proposal 超出视频有效时间范围：{video} {segment}")
+    first = max(0, min(round(start * fps), total - 1))
+    last = max(0, min(round(end * fps), total - 1))
+    duration = end - start
+    left_end = start + 0.2 * duration
+    right_start = end - 0.2 * duration
+
+    def region_indices(begin: float, finish: float, count: int) -> list[int]:
+        # 与 Trace 一样，先把分区端点按原视频 FPS 映射到帧，再在分区内 linspace。
+        begin_frame = max(0, min(round(begin * fps), total - 1))
+        finish_frame = max(0, min(round(finish * fps), total - 1))
+        return np.linspace(begin_frame, finish_frame, count, dtype=int).tolist()
+
+    indices = (region_indices(start, left_end, 16)
+               + region_indices(left_end, right_start, 8)
+               + region_indices(right_start, end, 16))
+    if indices[0] != first or indices[-1] != last or len(indices) != 40:
+        raise RuntimeError(f"16/8/16 采样结果无效：{video} {segment}")
+    # Trace 使用 idx/fps - window_start；整数毫秒仅用于 Qwen 的 frames_indices/fps 接口。
+    proposal_duration = segment[1] - segment[0]
+    relative_milliseconds = [round(max(0.0, min(proposal_duration, index / fps - start)) * 1000)
+                             for index in indices]
+    batch = decoder.get_frames_at(indices=indices).data
+    if batch.shape[0] != 40 or batch.shape[1] != 3:
+        raise ValueError(f"解码帧形状错误：{video} {tuple(batch.shape)}")
+    height, width = batch.shape[2:]
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.stem + ".tmp.mp4")
-    duration = segment[1] - segment[0]
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-ss", number(segment[0]), "-i", str(video), "-t", number(duration),
-        "-vf", f"fps={frames / duration:.8f}", "-frames:v", str(frames),
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
+        "-r", f"{frames / proposal_duration:.8f}", "-i", "pipe:0", "-frames:v", str(frames),
         "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-pix_fmt", "yuv420p", str(temporary),
     ]
-    subprocess.run(command, check=True)
+    pixels = batch.permute(0, 2, 3, 1).contiguous().numpy().tobytes()
+    subprocess.run(command, input=pixels, check=True)
     if not temporary.is_file() or temporary.stat().st_size == 0:
         raise RuntimeError(f"截取片段失败：{video} {segment}")
+    if VideoDecoder(str(temporary)).metadata.num_frames != 40:
+        raise RuntimeError(f"片段编码后不是 40 帧：{temporary}")
+    timestamp_tmp = timestamps_path.with_name(timestamps_path.name + ".tmp")
+    timestamp_tmp.write_text(json.dumps({
+        "sampling": "trace16_8_16",
+        "proposal": list(segment),
+        "relative_milliseconds": relative_milliseconds,
+        "source_frame_indices": indices,
+        "source_fps": fps,
+        "timebase_hz": 1000,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(output)
+    timestamp_tmp.replace(timestamps_path)
