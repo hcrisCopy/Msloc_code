@@ -58,7 +58,9 @@ def gt_segments(row: dict) -> list[tuple[float, float, dict]]:
         if not isinstance(segment, list) or len(segment) != 2:
             raise ValueError(f"非法 GT 区间：{row['video_path']} {segment!r}")
         start, end = map(float, segment)
-        if not (math.isfinite(start) and math.isfinite(end) and 0 <= start < end):
+        # 拼接标注可能从 0 秒前约两帧开始；与非负 proposal 求交时才落入视频范围。
+        # Trace/scripts/build_opd_grpo_replay.py 也保留原始 GT 边界再计算交集。
+        if not (math.isfinite(start) and math.isfinite(end) and start < end):
             raise ValueError(f"非法 GT 边界：{row['video_path']} {segment!r}")
         result.append((start, end, ann))
     return result

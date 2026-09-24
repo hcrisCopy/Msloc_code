@@ -222,6 +222,18 @@ python evaluate_long.py \
 
 第二阶段代码统一放在 `Qwen/`；以下命令均在本仓库根目录执行。使用后训练版 `Qwen/Qwen3.5-4B`，SFT、OPD/OPSD 和 GRPO 共用独立环境。
 
+本阶段训练命令中的 `--max-steps -1` 表示按 `--epochs` 跑全量。单卡短跑时，把 `--devices` 改为 `0`、`--max-steps` 改为 `10`、`--save-steps` 改为 `5`。OPSD 仍要求所用 SFT 权重通过教师预检。若以后在同一目录跑全量，需要用 `--clean` 重新开始，不能用 `--resume auto` 接续短跑。
+
+本阶段带 `--resume` 的命令首次使用 `--resume none --clean`；中断后保持其余参数不变，改用 `--resume auto` 并去掉 `--clean`。SFT、OPSD 数据准备从上次完成的视频继续，已有片段会复用；GRPO 数据准备和评测复用已完成的记录；训练从最近的 checkpoint 继续。旧版 SFT/OPSD 脚本留下的临时 JSONL 不能直接续建，首次使用新版脚本时用 `--clean` 重建数据文件，已有片段仍会复用。
+
+下文统一使用三个名称，单位均为秒。第一阶段 proposal 和数据集标注都以**原视频起点**为基准：
+
+- **原始标注区间**：数据集给出的伪造区间。
+- **proposal 内的标注区间**：原始标注区间与 proposal 的交集，仍以原视频起点为基准。
+- **片段内目标区间**：交集的两个端点各减去 proposal 起点，以截取片段的起点为基准；这是模型训练和回答所用的区间。
+
+例如，原始标注区间为 `[100, 120]`，proposal 为 `[110, 130]`，则 proposal 内的标注区间为 `[110, 120]`，片段内目标区间为 `[0, 10]`。没有交集的 proposal 在片段级按 real 处理。
+
 ### 环境配置
 
 创建第二阶段环境 `msloc_qwen35`，并安装训练依赖：
@@ -263,13 +275,13 @@ hf download cross-encoder/nli-deberta-v3-small --local-dir ../cross-encoder/nli-
 
 片段 MP4 旁的 `.timestamps.json` 以毫秒记录每帧相对 proposal 起点的时间；`Qwen/trace_video_template.py` 将它转换成 Qwen3.5 所需的帧索引和 FPS，避免非均匀帧被当成匀速视频。
 
-模型先解释，最后对伪造片段给出片段内相对秒数，对真实片段输出 `Real`。程序将区间换算成原视频绝对秒数，再调用 `evaluate_long.py` 计算与 Trace 相同的指标。
+模型先解释，最后对伪造片段给出片段内目标区间，对真实片段输出 `Real`。程序给预测区间的两个端点加上 proposal 起点，换回原视频时间，再调用 `evaluate_long.py` 计算与 Trace 相同的指标。
 
-逐 proposal 统计时，只看该片段是否与标注的真实伪造时间段相交：相交为 fake，不相交为 real。因此，即使原视频是 fake，未碰到真实伪造时间段的 proposal 也按 real 片段统计。回答格式错误或区间越界记为 `invalid`，不算模型回答了 `Real`，也不会生成预测的伪造时间段。
+逐 proposal 统计时，只看它是否与原始标注区间相交：相交为 fake，不相交为 real。因此，即使原视频是 fake，未碰到原始标注区间的 proposal 也按 real 片段统计。回答格式错误或区间越界记为 `invalid`，不算模型回答了 `Real`，也不会生成预测的伪造区间。
 
 在 `metrics.json` 的整视频指标中，如果一条视频最终没有任何有效的伪造预测，它会被算成预测 real。当原视频是 fake 时，这种情况就会降低`Det_Acc`；没有预测区间也会影响 `Loc_F1` 和 `Loc_IoU`。原视频是 real 时，`Det_Acc` 算对，定位指标不会因此产生误报。
 
-结果保存在 `../MSLoc_data/Qwen/base_eval/`：`predictions.json` 保存模型原文和每个 proposal 的判定；`parse_summary.json` 汇总逐 proposal 的误报、漏报及无效回答；`metrics.json` 使用原视频标注的真实伪造时间段计算整视频指标。
+结果保存在 `../MSLoc_data/Qwen/base_eval/`：`predictions.json` 保存模型原文和每个 proposal 的判定；`parse_summary.json` 汇总逐 proposal 的误报、漏报及无效回答；`metrics.json` 使用原始标注区间计算整视频指标。
 
 ```bash
 python Qwen/evaluate.py \
@@ -289,7 +301,7 @@ python Qwen/evaluate.py \
 
 ### Qwen3.5-4B SFT
 
-先把训练 proposal 中与伪造 GT 相交的片段做成视频训练集。标签只用 proposal 内的 GT 交集；一个 proposal 命中多个 GT 时选交集最长的一处，并在审计文件记录命中数。完整覆盖 GT 时，解释按标注组织为开始、主要异常、结束三句，或仅主要异常一句；只覆盖部分 GT 时仅保留主要异常一句，避免引用片段外的起止画面。输出时不加阶段标签。训练提示词只要求定位异常；正常和未命中 GT 的 proposal 不参加这一步 SFT。数据与视频片段写入 `../MSLoc_data/Qwen/sft_data/`。
+先把与原始标注区间相交的训练 proposal 做成视频训练集。每个样本先取 proposal 内的标注区间，再换成片段内目标区间作为模型的定位答案；一个 proposal 命中多个原始标注区间时选交集最长的一处，并在审计文件记录命中数。proposal 完整覆盖原始标注区间时，解释按标注组织为开始、主要异常、结束三句，或仅主要异常一句；只覆盖部分原始标注区间时仅保留主要异常一句，避免引用片段外的起止画面。三句话直接写在 `Explanation:` 后，用句号分隔。训练提示词只要求定位异常；正常和未命中原始标注区间的 proposal 不参加这一步 SFT。数据与视频片段写入 `../MSLoc_data/Qwen/sft_data/`。
 
 ```bash
 python Qwen/prepare_sft.py \
@@ -299,10 +311,11 @@ python Qwen/prepare_sft.py \
   --prompt-file Qwen/prompts/student_sft.txt \
   --output-dir ../MSLoc_data/Qwen/sft_data \
   --frames 40 \
+  --resume none \
   --clean
 ```
 
-用 LoRA 训练 Qwen3.5-4B，关闭 thinking。单卡时只把 `--devices` 改成 `0`；程序会保持全局 batch 为 8。断点继续时用 `--resume auto` 并去掉 `--clean`。权重和训练曲线在 `../MSLoc_data/Qwen/sft/`。
+用 LoRA 训练 Qwen3.5-4B，关闭 thinking。单卡时只把 `--devices` 改成 `0`；程序会保持全局 batch 为 8。权重和训练曲线在 `../MSLoc_data/Qwen/sft/`。
 
 ```bash
 python Qwen/train_sft.py \
@@ -311,6 +324,7 @@ python Qwen/train_sft.py \
   --output ../MSLoc_data/Qwen/sft \
   --devices 0,1,2,3,4,5,6,7 \
   --epochs 2 \
+  --max-steps -1 \
   --global-batch-size 8 \
   --learning-rate 1e-4 \
   --max-length 8192 \
@@ -341,7 +355,7 @@ python Qwen/evaluate.py \
 
 ### Qwen3.5-4B OPSD：教师评测与训练
 
-先在训练 proposal 上用相同的 SFT adapter、视频和学生提示词各做一次完整生成评测。预检教师沿用学生的任务说明、格式要求与示例，只额外收到当前 proposal 的片段内 GT 区间或“此片段 real”的文字真值，以及异常对象与类别。提示词按一或三句解释明确这些类别对应的内容，不提供标注原句。这一步用于验证初始教师，最终测试仍由不看真值的学生完成。两份评测分别写入 `../MSLoc_data/Qwen/opsd_student_precheck/` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck/`。
+先在训练 proposal 上用相同的 SFT adapter、视频和学生提示词各做一次完整生成评测。预检教师沿用学生的任务说明、格式要求与示例，只额外收到当前 proposal 的片段内目标区间或“此片段 real”的文字真值，以及异常对象与类别。提示词按一或三句解释明确这些类别对应的内容，不提供标注原句。这一步用于验证初始教师，最终测试仍由不看真值的学生完成。两份评测分别写入 `../MSLoc_data/Qwen/opsd_student_precheck/` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck/`。
 
 ```bash
 python Qwen/evaluate.py \
@@ -386,7 +400,7 @@ python Qwen/check_teacher.py \
   --clean
 ```
 
-把全部训练 proposal 做成 OPSD 数据，异常片段使用与 SFT 一致的单区间 GT；fake 视频中未命中 GT 的 proposal 按 Trace 记为近邻难负例或误报，教师对这些片段给 real 真值。真实视频的误报也保留。学生消息沿用 `Qwen/prompts/student.txt`；教师在相同视频上额外看到片段真假、异常片段内相对 GT，以及标注的时空伪造类别、`obj`、对象 `bnd_class` 和 `bnd_sub_class`、起止边界各自的 `bnd_class`。提示词说明这些类别对应解释中的哪一句，但不提供标注原句。`teacher_precheck.txt` 用于完整生成评测，`teacher_opsd.txt` 用于学生在线生成后的逐 token 蒸馏；两者分别写真假指令，训练器将学生已经生成的 token 接在教师输入之后。数据、审计记录和片段写入 `../MSLoc_data/Qwen/opsd_data/`。
+把全部训练 proposal 做成 OPSD 数据，异常片段使用与 SFT 一致的单个片段内目标区间；fake 视频中未命中原始标注区间的 proposal 按 Trace 记为近邻难负例或误报，教师对这些片段给 real 真值。真实视频的误报也保留。学生消息沿用 `Qwen/prompts/student.txt`；教师在相同视频上额外看到片段真假、异常片段的片段内目标区间，以及标注的时空伪造类别、`obj`、对象 `bnd_class` 和 `bnd_sub_class`、起止边界各自的 `bnd_class`。提示词说明这些类别对应解释中的哪一句，但不提供标注原句。`teacher_precheck.txt` 用于完整生成评测，`teacher_opsd.txt` 用于学生在线生成后的逐 token 蒸馏；两者分别写真假指令，训练器将学生已经生成的 token 接在教师输入之后。数据、审计记录和片段写入 `../MSLoc_data/Qwen/opsd_data/`。
 
 ```bash
 python Qwen/prepare_opsd.py \
@@ -398,10 +412,11 @@ python Qwen/prepare_opsd.py \
   --teacher-opsd-prompt-file Qwen/prompts/teacher_opsd.txt \
   --output-dir ../MSLoc_data/Qwen/opsd_data \
   --frames 40 \
+  --resume none \
   --clean
 ```
 
-从 SFT 的 LoRA 继续训练。使用 ms-swift GKD/OPSD：学生在线生成；同一当前 LoRA 权重在教师特权提示词下停止梯度并提供分布监督，学生更新后教师权重也随之更新。初始教师评测未通过时程序会拒绝训练。视频 rollout 使用 Transformers 路径。单卡时只把 `--devices` 改成 `0`；断点继续用 `--resume auto` 并去掉 `--clean`，程序会核对原训练参数和输入文件。权重、训练曲线及续训配置写入 `../MSLoc_data/Qwen/opsd/`。
+从 SFT 的 LoRA 继续训练。使用 ms-swift GKD/OPSD：学生在线生成；同一当前 LoRA 权重在教师特权提示词下停止梯度并提供分布监督，学生更新后教师权重也随之更新。初始教师评测未通过时程序会拒绝训练。视频 rollout 使用 Transformers 路径。单卡时只把 `--devices` 改成 `0`；续训时程序会核对原训练参数和输入文件。权重、训练曲线及续训配置写入 `../MSLoc_data/Qwen/opsd/`。
 
 ```bash
 python Qwen/train_opsd.py \
@@ -412,6 +427,7 @@ python Qwen/train_opsd.py \
   --output ../MSLoc_data/Qwen/opsd \
   --devices 0,1,2,3,4,5,6,7 \
   --epochs 1 \
+  --max-steps -1 \
   --global-batch-size 8 \
   --learning-rate 2e-5 \
   --max-length 8192 \
@@ -441,7 +457,7 @@ python Qwen/evaluate.py \
 
 ### Qwen3.5-4B GRPO
 
-复用 OPSD 已制作的 16/8/16 共 40 帧片段，把片段真假、相对 GT 区间和标注解释事实写入奖励字段，不放进学生提示词。学生仍使用 `Qwen/prompts/student.txt`，先解释，再输出 `Real` 或单个 `Interval: [start, end]`。数据写入 `../MSLoc_data/Qwen/grpo_data/`；中断后改用 `--resume auto` 并去掉 `--clean`，程序会核对输入文件后续建。
+复用 OPSD 已制作的 16/8/16 共 40 帧片段，把片段真假、片段内目标区间和标注解释事实写入奖励字段，不放进学生提示词。学生仍使用 `Qwen/prompts/student.txt`，先解释，再输出 `Real` 或单个 `Interval: [start, end]`。数据写入 `../MSLoc_data/Qwen/grpo_data/`；续建时程序会核对输入文件。
 
 ```bash
 python Qwen/prepare_grpo.py \
@@ -454,7 +470,7 @@ python Qwen/prepare_grpo.py \
   --clean
 ```
 
-从 OPSD LoRA 继续训练 LoRA。三项奖励沿用 Trace 的权重：定位 1.0、格式 0.1、解释 0.3。定位比较片段内单区间 IoU 和边界误差；真实片段回答 `Real` 得分。解释只对定位 IoU 至少 0.3 的异常回答评分，使用本地冻结 NLI 模型比较生成解释与标注事实。`--use_vllm false` 保证在线采样经过自定义视频时间戳模板。4 次采样组成一个 GRPO 组，关闭 thinking，与正式评测格式一致。单卡只改 `--devices` 为 `0`；断点继续改 `--resume auto` 并去掉 `--clean`。权重、采样记录和奖励曲线写入 `../MSLoc_data/Qwen/grpo/`。
+从 OPSD LoRA 继续训练 LoRA。三项奖励沿用 Trace 的权重：定位 1.0、格式 0.1、解释 0.3。定位比较片段内单区间 IoU 和边界误差；真实片段回答 `Real` 得分。解释只对定位 IoU 至少 0.3 的异常回答评分，使用本地冻结 NLI 模型比较生成解释与标注事实。`--use_vllm false` 保证在线采样经过自定义视频时间戳模板。4 次采样组成一个 GRPO 组，关闭 thinking，与正式评测格式一致。单卡只改 `--devices` 为 `0`。权重、采样记录和奖励曲线写入 `../MSLoc_data/Qwen/grpo/`。
 
 ```bash
 python Qwen/train_grpo.py \
@@ -465,6 +481,7 @@ python Qwen/train_grpo.py \
   --output ../MSLoc_data/Qwen/grpo \
   --devices 0,1,2,3,4,5,6,7 \
   --epochs 1 \
+  --max-steps -1 \
   --global-batch-size 8 \
   --num-generations 4 \
   --learning-rate 1e-6 \

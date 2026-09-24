@@ -34,6 +34,7 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--devices", required=True, help="逗号分隔，如 0 或 0,1,2,3,4,5,6,7")
     parser.add_argument("--epochs", type=int, required=True)
+    parser.add_argument("--max-steps", type=int, required=True, help="-1 按 epochs 跑全量；正数用于限定更新步数")
     parser.add_argument("--global-batch-size", type=int, required=True)
     parser.add_argument("--learning-rate", type=float, required=True)
     parser.add_argument("--max-length", type=int, required=True)
@@ -48,6 +49,10 @@ def main() -> None:
         raise ValueError("global-batch-size 必须是正数且能被 GPU 数整除")
     if args.epochs <= 0 or args.save_steps <= 0 or args.max_length <= 0 or args.learning_rate <= 0:
         raise ValueError("epochs、save-steps、max-length 和 learning-rate 必须大于 0")
+    if args.max_steps != -1 and args.max_steps <= 0:
+        raise ValueError("max-steps 只能是 -1 或正整数")
+    if args.max_steps > 0 and args.save_steps > args.max_steps:
+        raise ValueError("短跑时 save-steps 不能大于 max-steps，训练结束前须产生 checkpoint")
     if not Path(args.model).is_dir() or not Path(args.dataset).is_file():
         raise FileNotFoundError("模型目录或训练数据不存在")
     with Path(args.dataset).open(encoding="utf-8") as handle:
@@ -80,6 +85,7 @@ def main() -> None:
         "dataset_sha256": file_sha256(Path(args.dataset)),
         "frames": 40, "sampling": "trace16_8_16",
         "devices": devices, "epochs": args.epochs,
+        "max_steps": args.max_steps,
         "global_batch_size": args.global_batch_size,
         "learning_rate": args.learning_rate, "max_length": args.max_length,
         "save_steps": args.save_steps,
@@ -118,6 +124,7 @@ def main() -> None:
         "--enable_thinking", "false",
         "--add_non_thinking_prefix", "true",
         "--num_train_epochs", str(args.epochs),
+        "--max_steps", str(args.max_steps),
         "--per_device_train_batch_size", "1",
         "--gradient_accumulation_steps", str(args.global_batch_size // len(devices)),
         "--learning_rate", str(args.learning_rate),

@@ -35,6 +35,7 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--devices", required=True)
     parser.add_argument("--epochs", type=int, required=True)
+    parser.add_argument("--max-steps", type=int, required=True, help="-1 按 epochs 跑全量；正数用于限定更新步数")
     parser.add_argument("--global-batch-size", type=int, required=True)
     parser.add_argument("--num-generations", type=int, required=True)
     parser.add_argument("--learning-rate", type=float, required=True)
@@ -52,6 +53,10 @@ def main() -> None:
         raise ValueError("global-batch-size 必须同时被 GPU 数和 num-generations 整除")
     if min(args.epochs, args.max_length, args.max_completion_length, args.save_steps) <= 0 or args.learning_rate <= 0:
         raise ValueError("训练轮次、长度、保存步数和学习率必须大于 0")
+    if args.max_steps != -1 and args.max_steps <= 0:
+        raise ValueError("max-steps 只能是 -1 或正整数")
+    if args.max_steps > 0 and args.save_steps > args.max_steps:
+        raise ValueError("短跑时 save-steps 不能大于 max-steps，训练结束前须产生 checkpoint")
     model, adapter, dataset, nli_model = map(Path, (args.model, args.adapter, args.dataset, args.nli_model))
     if any(not path.is_dir() for path in (model, adapter, nli_model)) or not dataset.is_file():
         raise FileNotFoundError("模型、OPSD adapter、GRPO 数据或本地 NLI 模型缺失")
@@ -120,6 +125,7 @@ def main() -> None:
         "--num_iterations", "1", "--beta", "0.02",
         "--temperature", "0.8", "--top_p", "0.95",
         "--num_train_epochs", str(args.epochs),
+        "--max_steps", str(args.max_steps),
         "--per_device_train_batch_size", "1",
         "--gradient_accumulation_steps", str(args.global_batch_size // len(devices)),
         "--learning_rate", str(args.learning_rate),

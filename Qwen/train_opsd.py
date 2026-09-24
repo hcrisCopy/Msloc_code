@@ -35,6 +35,7 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--devices", required=True)
     parser.add_argument("--epochs", type=int, required=True)
+    parser.add_argument("--max-steps", type=int, required=True, help="-1 按 epochs 跑全量；正数用于限定更新步数")
     parser.add_argument("--global-batch-size", type=int, required=True)
     parser.add_argument("--learning-rate", type=float, required=True)
     parser.add_argument("--max-length", type=int, required=True)
@@ -50,6 +51,10 @@ def main() -> None:
         raise ValueError("global-batch-size 必须是正数且能被 GPU 数整除")
     if min(args.epochs, args.max_length, args.max_completion_length, args.save_steps) <= 0 or args.learning_rate <= 0:
         raise ValueError("epochs、长度、save-steps 和 learning-rate 必须大于 0")
+    if args.max_steps != -1 and args.max_steps <= 0:
+        raise ValueError("max-steps 只能是 -1 或正整数")
+    if args.max_steps > 0 and args.save_steps > args.max_steps:
+        raise ValueError("短跑时 save-steps 不能大于 max-steps，训练结束前须产生 checkpoint")
     if not Path(args.model).is_dir() or not Path(args.adapter).is_dir() or not Path(args.dataset).is_file():
         raise FileNotFoundError("模型、SFT adapter 或 OPSD 数据不存在")
     adapter = Path(args.adapter)
@@ -145,6 +150,7 @@ def main() -> None:
         "--use_vllm", "false",
         "--use_liger_kernel", "false",
         "--num_train_epochs", str(args.epochs),
+        "--max_steps", str(args.max_steps),
         "--per_device_train_batch_size", "1",
         "--gradient_accumulation_steps", str(args.global_batch_size // len(devices)),
         "--learning_rate", str(args.learning_rate),
