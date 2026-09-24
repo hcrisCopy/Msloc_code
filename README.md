@@ -252,7 +252,10 @@ source Qwen/env.sh
 
 ```bash
 hf download Qwen/Qwen3.5-4B --local-dir ../Qwen/Qwen3.5-4B
+hf download cross-encoder/nli-deberta-v3-small --local-dir ../cross-encoder/nli-deberta-v3-small
 ```
+
+第二个模型是 GRPO 解释奖励使用的冻结 NLI 判别器；GRPO 开始前下载即可。
 
 ### Qwen3.5-4B 直接评测
 
@@ -426,6 +429,58 @@ python Qwen/evaluate.py \
   --clean
 ```
 
-grpo
+### Qwen3.5-4B GRPO
 
-grpo评测
+复用 OPSD 已制作的 16/8/16 共 40 帧片段，把片段真假、相对 GT 区间和标注解释事实写入奖励字段，不放进学生提示词。学生仍使用 `Qwen/prompts/student.txt`，先解释，再输出 `Real` 或单个 `Interval: [start, end]`。数据写入 `../MSLoc_data/Qwen/grpo_data/`；中断后改用 `--resume auto` 并去掉 `--clean`，程序会核对输入文件后续建。
+
+```bash
+python Qwen/prepare_grpo.py \
+  --opsd-dataset ../MSLoc_data/Qwen/opsd_data/train.jsonl \
+  --opsd-targets ../MSLoc_data/Qwen/opsd_data/targets.jsonl \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
+  --prompt-file Qwen/prompts/student.txt \
+  --output-dir ../MSLoc_data/Qwen/grpo_data \
+  --resume none \
+  --clean
+```
+
+从 OPSD LoRA 继续训练 LoRA。三项奖励沿用 Trace 的权重：定位 1.0、格式 0.1、解释 0.3。定位比较片段内单区间 IoU 和边界误差；真实片段回答 `Real` 得分。解释只对定位 IoU 至少 0.3 的异常回答评分，使用本地冻结 NLI 模型比较生成解释与标注事实。`--use_vllm false` 保证在线采样经过自定义视频时间戳模板。4 次采样组成一个 GRPO 组，关闭 thinking，与正式评测格式一致。单卡只改 `--devices` 为 `0`；断点继续改 `--resume auto` 并去掉 `--clean`。权重、采样记录和奖励曲线写入 `../MSLoc_data/Qwen/grpo/`。
+
+```bash
+python Qwen/train_grpo.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/opsd/last \
+  --dataset ../MSLoc_data/Qwen/grpo_data/train.jsonl \
+  --nli-model ../cross-encoder/nli-deberta-v3-small \
+  --output ../MSLoc_data/Qwen/grpo \
+  --devices 0,1,2,3,4,5,6,7 \
+  --epochs 1 \
+  --global-batch-size 8 \
+  --num-generations 4 \
+  --learning-rate 1e-6 \
+  --max-length 8192 \
+  --max-completion-length 256 \
+  --save-steps 100 \
+  --resume none \
+  --clean
+```
+
+### Qwen3.5-4B GRPO 评测
+
+使用同一学生提示词和测试 proposal，按 SFT、OPSD 相同的 Trace 定位指标评测 `last` adapter。结果写入 `../MSLoc_data/Qwen/grpo_eval/`。
+
+```bash
+python Qwen/evaluate.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/grpo/last \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --prompt-file Qwen/prompts/student.txt \
+  --output ../MSLoc_data/Qwen/grpo_eval \
+  --devices 0,1,2,3,4,5,6,7 \
+  --frames 40 \
+  --max-new-tokens 256 \
+  --resume none \
+  --clean
+```
