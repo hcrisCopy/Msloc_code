@@ -254,17 +254,176 @@ source Qwen/env.sh
 hf download Qwen/Qwen3.5-4B --local-dir ../Qwen/Qwen3.5-4B
 ```
 
-qwen3.5评测
+### Qwen3.5-4B 直接评测
 
-qwen3.5 SFT训练
+输入第一阶段测试 proposal、待检视频和 `_0119` 测试标注。每个 proposal 单独截成片段；模型先解释，最后对伪造片段给出片段内相对秒数，对真实片段输出 `Real`。程序将区间换算成原视频绝对秒数，再调用 `evaluate_long.py` 计算与 Trace 相同的指标。格式或时间范围错误会标为 `invalid`，原文和错误数量分别保存在 `predictions.json` 与 `parse_summary.json`；指标仍按 Trace 的规则将无有效定位的预测视为无伪造片段。结果在 `../MSLoc_data/Qwen/base_eval/`，包含 `metrics.json`。
 
-qwen3.5 SFT评测
+```bash
+python Qwen/evaluate.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter none \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --prompt-file Qwen/prompts/student.txt \
+  --output ../MSLoc_data/Qwen/base_eval \
+  --devices 0,1,2,3,4,5,6,7 \
+  --frames 16 \
+  --max-new-tokens 256 \
+  --resume none \
+  --clean
+```
 
-qwen3.5带特权信息教师评测
+### Qwen3.5-4B SFT
 
-opd
+先把训练 proposal 中与伪造 GT 相交的片段做成视频训练集。标签只用 proposal 内的 GT 交集；一个 proposal 命中多个 GT 时选交集最长的一处，并在审计文件记录命中数。完整覆盖 GT 时，解释按标注组织为开始、主要异常、结束三句，或仅主要异常一句；只覆盖部分 GT 时仅保留主要异常一句，避免引用片段外的起止画面。输出时不加阶段标签。训练提示词只要求定位异常；正常和未命中 GT 的 proposal 不参加这一步 SFT。数据与视频片段写入 `../MSLoc_data/Qwen/sft_data/`。
 
-opd学生评测
+```bash
+python Qwen/prepare_sft.py \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval_train/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --prompt-file Qwen/prompts/student_sft.txt \
+  --output-dir ../MSLoc_data/Qwen/sft_data \
+  --frames 16 \
+  --clean
+```
+
+用 LoRA 训练 Qwen3.5-4B，关闭 thinking。单卡时只把 `--devices` 改成 `0`；程序会保持全局 batch 为 8。断点继续时用 `--resume auto` 并去掉 `--clean`。权重和训练曲线在 `../MSLoc_data/Qwen/sft/`。
+
+```bash
+python Qwen/train_sft.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --dataset ../MSLoc_data/Qwen/sft_data/train.jsonl \
+  --output ../MSLoc_data/Qwen/sft \
+  --devices 0,1,2,3,4,5,6,7 \
+  --epochs 2 \
+  --global-batch-size 8 \
+  --learning-rate 1e-4 \
+  --max-length 4096 \
+  --save-steps 100 \
+  --resume none \
+  --clean
+```
+
+### Qwen3.5-4B SFT 评测
+
+用相同测试 proposal、提示词与指标评测 SFT 的 `last` adapter。结果写入 `../MSLoc_data/Qwen/sft_eval/`。
+
+```bash
+python Qwen/evaluate.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/sft/last \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --prompt-file Qwen/prompts/student.txt \
+  --output ../MSLoc_data/Qwen/sft_eval \
+  --devices 0,1,2,3,4,5,6,7 \
+  --frames 16 \
+  --max-new-tokens 256 \
+  --resume none \
+  --clean
+```
+
+### Qwen3.5-4B OPSD：教师评测与训练
+
+先在训练 proposal 上用相同的 SFT adapter、视频和学生提示词各做一次完整生成评测。教师额外收到当前 proposal 的片段内 GT 区间，或“此片段正常”的文字真值；教师与学生都先解释、后输出 `Real` 或 `Interval`。这一步只用于验证教师，最终测试仍由不看真值的学生完成。两份评测分别写入 `../MSLoc_data/Qwen/opsd_student_precheck/` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck/`。
+
+```bash
+python Qwen/evaluate.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/sft/last \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval_train/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --prompt-file Qwen/prompts/student.txt \
+  --output ../MSLoc_data/Qwen/opsd_student_precheck \
+  --devices 0,1,2,3,4,5,6,7 \
+  --frames 16 \
+  --max-new-tokens 256 \
+  --resume none \
+  --clean
+```
+
+```bash
+python Qwen/evaluate.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/sft/last \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval_train/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --prompt-file Qwen/prompts/student.txt \
+  --teacher-prompt-file Qwen/prompts/teacher.txt \
+  --output ../MSLoc_data/Qwen/opsd_teacher_precheck \
+  --devices 0,1,2,3,4,5,6,7 \
+  --frames 16 \
+  --max-new-tokens 256 \
+  --resume none \
+  --clean
+```
+
+比较 Trace 的 `Total` 指标：教师 `Loc_F1`、`Loc_IoU` 均提高，`Det_Acc` 和无效格式数不退化，才允许训练。结果写入 `../MSLoc_data/Qwen/opsd_teacher_gate.json`。
+
+```bash
+python Qwen/check_teacher.py \
+  --student-eval ../MSLoc_data/Qwen/opsd_student_precheck \
+  --teacher-eval ../MSLoc_data/Qwen/opsd_teacher_precheck \
+  --output ../MSLoc_data/Qwen/opsd_teacher_gate.json \
+  --clean
+```
+
+把全部训练 proposal 做成 OPSD 数据，异常片段使用与 SFT 一致的单区间 GT，未命中 GT 的片段给教师正常真值。学生消息完全沿用 `Qwen/prompts/student.txt`；异常教师追加 GT、标注类别和可见要点，正常教师改用中性措辞描述普通事件。两种教师输入都使用原片段视频和相同的两行输出格式，不拼接额外视觉内容。数据、审计记录和片段写入 `../MSLoc_data/Qwen/opsd_data/`。
+
+```bash
+python Qwen/prepare_opsd.py \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval_train/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --student-prompt-file Qwen/prompts/student.txt \
+  --teacher-prompt-file Qwen/prompts/teacher.txt \
+  --output-dir ../MSLoc_data/Qwen/opsd_data \
+  --frames 16 \
+  --clean
+```
+
+从 SFT 的 LoRA 继续训练。使用 ms-swift GKD/OPSD：学生在线生成，当前 LoRA 权重读取教师提示词并提供分布监督；教师评测未通过时程序会拒绝训练。视频 rollout 先使用 Transformers 路径，避免多模态 vLLM 的 token 对齐问题。单卡时只把 `--devices` 改成 `0`；断点继续用 `--resume auto` 并去掉 `--clean`。权重与训练曲线写入 `../MSLoc_data/Qwen/opsd/`。
+
+```bash
+python Qwen/train_opsd.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/sft/last \
+  --dataset ../MSLoc_data/Qwen/opsd_data/train.jsonl \
+  --teacher-gate ../MSLoc_data/Qwen/opsd_teacher_gate.json \
+  --output ../MSLoc_data/Qwen/opsd \
+  --devices 0,1,2,3,4,5,6,7 \
+  --epochs 1 \
+  --global-batch-size 8 \
+  --learning-rate 2e-5 \
+  --max-length 4096 \
+  --max-completion-length 256 \
+  --save-steps 100 \
+  --resume none \
+  --clean
+```
+
+最后用原学生提示词和测试集评测 OPSD adapter。结果写入 `../MSLoc_data/Qwen/opsd_eval/`，可与 SFT 的 `metrics.json` 直接比较。
+
+```bash
+python Qwen/evaluate.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/opsd/last \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --prompt-file Qwen/prompts/student.txt \
+  --output ../MSLoc_data/Qwen/opsd_eval \
+  --devices 0,1,2,3,4,5,6,7 \
+  --frames 16 \
+  --max-new-tokens 256 \
+  --resume none \
+  --clean
+```
 
 grpo
 

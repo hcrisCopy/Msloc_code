@@ -679,6 +679,7 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size, test_fake_segmen
     video_loc_gt = {}
     processed_samples = int(cfg.get('eval_resume_start_index', 0))
     progress_path = cfg.get('eval_progress_path')
+    save_progress_every = int(cfg.get('eval_save_progress_every', 500))
     if cfg.get('resume_eval') and progress_path and os.path.isfile(progress_path):
         state = torch.load(progress_path, map_location='cpu', weights_only=False)
         if state.get('signature') != cfg.get('eval_signature'):
@@ -754,7 +755,8 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size, test_fake_segmen
                 video_seg_gt[video_id_j].append((window_idx[j], target[j].cpu().detach().numpy()))
 
             processed_samples += len(video_id)
-            if progress_path:
+            # 完整状态会随评测进度增大；按间隔保存，避免每批重写造成速度持续下降。
+            if progress_path and ((i + 1) % save_progress_every == 0 or i + 1 == len(val_loader)):
                 state = {
                     'signature': cfg.get('eval_signature'),
                     'next_sample_index': processed_samples,

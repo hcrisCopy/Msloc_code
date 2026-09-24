@@ -283,7 +283,9 @@ def main():
                         help='Optional DataLoader worker override; use 0 when debugging')
     parser.add_argument('--resume', action='store_true', help='Resume an interrupted evaluation from its progress file')
     parser.add_argument('--clean', action='store_true', help='Remove this output directory\'s known evaluation products and caches first')
-    parser.add_argument('--save-progress', action='store_true', help='Save batch-level evaluation progress for later --resume')
+    parser.add_argument('--save-progress', action='store_true', help='Save evaluation progress for later --resume')
+    parser.add_argument('--save-progress-every', type=int, default=500,
+                        help='Save progress every N evaluation batches (default: 500)')
     parser.add_argument('--cache-data', action='store_true', help='Cache constructed video windows for reuse')
     parser.add_argument('--reuse-existing', action='store_true',
                         help='Reuse a completed evaluation in output_dir instead of running inference again')
@@ -292,6 +294,8 @@ def main():
                         help='Optional override for cfg.neuron_indices_path')
     
     args = parser.parse_args()
+    if args.save_progress_every <= 0:
+        raise ValueError('--save-progress-every must be positive')
     args.device_ids = parse_device_ids(args.device_ids)
     output_root = Path(args.output_dir).resolve()
     completed_outputs = ('predictions.json', 'evaluation_results.json', 'summary_results.json')
@@ -367,6 +371,7 @@ def main():
     }
     cfg['eval_signature'] = hashlib.sha1(json.dumps(signature_payload, sort_keys=True).encode('utf-8')).hexdigest()
     cfg['eval_progress_path'] = str(output_root / 'eval_progress.pt') if (args.save_progress or args.resume) else None
+    cfg['eval_save_progress_every'] = args.save_progress_every
     cfg['resume_eval'] = args.resume
     if args.resume and Path(cfg['eval_progress_path']).is_file():
         progress = torch.load(cfg['eval_progress_path'], map_location='cpu', weights_only=False)
