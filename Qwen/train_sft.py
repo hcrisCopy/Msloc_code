@@ -92,6 +92,7 @@ def main() -> None:
     env = os.environ.copy()
     env.update({
         "CUDA_VISIBLE_DEVICES": ",".join(devices),
+        "LOG_LEVEL": "INFO",
         "NPROC_PER_NODE": str(len(devices)),
         "FORCE_QWENVL_VIDEO_READER": "torchcodec",
         "FPS_MAX_FRAMES": "40",

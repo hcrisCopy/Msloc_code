@@ -259,7 +259,17 @@ hf download cross-encoder/nli-deberta-v3-small --local-dir ../cross-encoder/nli-
 
 ### Qwen3.5-4B 直接评测
 
-输入第一阶段测试 proposal、待检视频和 `_0119` 测试标注。沿用 Trace 的取帧方式：每个 proposal 的前 20%、中间 60%、后 20% 分别取 16、8、16 帧。片段 MP4 旁的 `.timestamps.json` 以毫秒记录每帧相对 proposal 起点的时间；`Qwen/trace_video_template.py` 将它转换成 Qwen3.5 所需的帧索引和 FPS，避免非均匀帧被当成匀速视频。SFT、教师预检、OPSD 和正式评测共用这一设置；已有均匀 40 帧数据和 adapter 需要重新生成与训练。模型先解释，最后对伪造片段给出片段内相对秒数，对真实片段输出 `Real`。程序将区间换算成原视频绝对秒数，再调用 `evaluate_long.py` 计算与 Trace 相同的指标。格式或时间范围错误单独记为 `invalid`；`predictions.json` 保留原文与逐 proposal 的真假判定，`parse_summary.json` 汇总误报、漏报和格式错误。fake 视频中未命中 GT 的 proposal 按片段记为 real；整视频的 `metrics.json` 仍使用原视频 GT。结果在 `../MSLoc_data/Qwen/base_eval/`。
+输入第一阶段测试 proposal、待检视频和 `_0119` 测试标注。沿用 Trace 的取帧方式：每个 proposal 的前 20%、中间 60%、后 20% 分别取 16、8、16 帧。SFT、教师预检、OPSD 和正式评测共用这一设置。
+
+片段 MP4 旁的 `.timestamps.json` 以毫秒记录每帧相对 proposal 起点的时间；`Qwen/trace_video_template.py` 将它转换成 Qwen3.5 所需的帧索引和 FPS，避免非均匀帧被当成匀速视频。
+
+模型先解释，最后对伪造片段给出片段内相对秒数，对真实片段输出 `Real`。程序将区间换算成原视频绝对秒数，再调用 `evaluate_long.py` 计算与 Trace 相同的指标。
+
+逐 proposal 统计时，只看该片段是否与标注的真实伪造时间段相交：相交为 fake，不相交为 real。因此，即使原视频是 fake，未碰到真实伪造时间段的 proposal 也按 real 片段统计。回答格式错误或区间越界记为 `invalid`，不算模型回答了 `Real`，也不会生成预测的伪造时间段。
+
+在 `metrics.json` 的整视频指标中，如果一条视频最终没有任何有效的伪造预测，它会被算成预测 real。当原视频是 fake 时，这种情况就会降低`Det_Acc`；没有预测区间也会影响 `Loc_F1` 和 `Loc_IoU`。原视频是 real 时，`Det_Acc` 算对，定位指标不会因此产生误报。
+
+结果保存在 `../MSLoc_data/Qwen/base_eval/`：`predictions.json` 保存模型原文和每个 proposal 的判定；`parse_summary.json` 汇总逐 proposal 的误报、漏报及无效回答；`metrics.json` 使用原视频标注的真实伪造时间段计算整视频指标。
 
 ```bash
 python Qwen/evaluate.py \
