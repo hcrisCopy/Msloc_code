@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from common import explanation, gt_segments, number, overlap
+from common import explanation, first_cot_entry, gt_segments, number, overlap
 
 
 def proposal_target(proposal: tuple[float, float], annotation: dict) -> dict:
@@ -36,15 +36,14 @@ def proposal_target(proposal: tuple[float, float], annotation: dict) -> dict:
     if clipped != (start, end) and len(captions) == 3:
         captions = [captions[1]]
     sentence_count = len(captions)
-    object_items = ann.get("obj_cot") or []
-    object_entry = object_items[0]
+    object_entry = first_cot_entry(ann, "obj_cot")
     object_name = str(object_entry.get("obj", "")).strip()
     object_class = str(object_entry.get("bnd_class", "")).strip()
     object_subclass = str(object_entry.get("bnd_sub_class", "")).strip()
     round4 = "Round4" in str(ann.get("combine_dir", ""))
     has_visible_boundaries = not round4 and clipped == (start, end) and sentence_count == 3
-    start_class = str((ann.get("bnd_cot_st") or [{}])[0].get("bnd_class", "")).strip() if has_visible_boundaries else ""
-    end_class = str((ann.get("bnd_cot_ed") or [{}])[0].get("bnd_class", "")).strip() if has_visible_boundaries else ""
+    start_class = str(first_cot_entry(ann, "bnd_cot_st").get("bnd_class", "")).strip() if has_visible_boundaries else ""
+    end_class = str(first_cot_entry(ann, "bnd_cot_ed").get("bnd_class", "")).strip() if has_visible_boundaries else ""
     return {
         "kind": "fake",
         "relative_segment": [clipped[0] - proposal[0], clipped[1] - proposal[0]],

@@ -68,10 +68,21 @@ def overlap(a: tuple[float, float], b: tuple[float, float]) -> float:
     return max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
 
 
+def first_cot_entry(ann: dict, key: str) -> dict:
+    """CoT 标注兼容单个对象与对象列表；参考 Trace 的 first() 读取方式。"""
+    entries = ann.get(key)
+    if entries is None or entries == []:
+        return {}
+    if isinstance(entries, dict):
+        return entries
+    if isinstance(entries, list) and isinstance(entries[0], dict):
+        return entries[0]
+    raise ValueError(f"{key} 必须是对象或对象列表，实际为 {type(entries).__name__}")
+
+
 def explanation(ann: dict) -> list[str]:
     def first_text(key: str, field: str) -> str:
-        items = ann.get(key) or []
-        return " ".join(str(items[0].get(field, "")).split()) if items else ""
+        return " ".join(str(first_cot_entry(ann, key).get(field, "")).split())
 
     object_text = first_text("obj_cot", "obj_caption")
     if not object_text:

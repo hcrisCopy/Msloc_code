@@ -10,7 +10,7 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from common import gt_segments, overlap, read_records
+from common import first_cot_entry, gt_segments, overlap, read_records
 from opsd_common import student_message
 
 
@@ -38,12 +38,12 @@ def evidence_for(proposal: list[float], annotation: dict, target: dict) -> dict:
     relative = [clipped[0] - proposal[0], clipped[1] - proposal[0]]
     if any(abs(a - b) > 1e-5 for a, b in zip(relative, target["target_relative"])):
         raise ValueError(f"OPSD 与 GRPO 的目标区间不同：{target['id']}")
-    obj = (ann.get("obj_cot") or [])[0]
+    obj = first_cot_entry(ann, "obj_cot")
     if target["explanation_sentence_count"] not in (1, 3):
         raise ValueError(f"解释句数必须是 1 或 3：{target['id']}")
     one_sentence = target["explanation_sentence_count"] == 1
-    start_ann = (ann.get("bnd_cot_st") or [{}])[0]
-    end_ann = (ann.get("bnd_cot_ed") or [{}])[0]
+    start_ann = first_cot_entry(ann, "bnd_cot_st")
+    end_ann = first_cot_entry(ann, "bnd_cot_ed")
     evidence = {
         "object_caption": str(obj.get("obj_caption", "")).strip(),
         "object_class": str(obj.get("bnd_sub_class", "")).strip(),
