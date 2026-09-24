@@ -52,6 +52,10 @@ def main() -> None:
         raise ValueError("epochs、长度、save-steps 和 learning-rate 必须大于 0")
     if not Path(args.model).is_dir() or not Path(args.adapter).is_dir() or not Path(args.dataset).is_file():
         raise FileNotFoundError("模型、SFT adapter 或 OPSD 数据不存在")
+    adapter = Path(args.adapter)
+    adapter_weights = adapter / "adapter_model.safetensors"
+    if not (adapter / "adapter_config.json").is_file() or not adapter_weights.is_file():
+        raise FileNotFoundError(f"SFT LoRA 缺少 adapter 配置或权重：{adapter}")
     sft_config = json.loads((Path(args.adapter).parent / "sft_config.json").read_text(encoding="utf-8"))
     if (sft_config["frames"] != 40 or sft_config.get("sampling") != "trace16_8_16"
             or Path(sft_config["model"]).resolve() != Path(args.model).resolve()):
@@ -63,6 +67,9 @@ def main() -> None:
     student_config = json.loads((Path(gate["student_eval"]) / "eval_config.json").read_text(encoding="utf-8"))
     if Path(student_config["adapter"]).resolve() != Path(args.adapter).resolve():
         raise ValueError("教师准入所用 SFT adapter 与 OPSD 初始 adapter 不同")
+    if (student_config["adapter_config_sha256"] != file_sha256(adapter / "adapter_config.json")
+            or student_config["adapter_weights_sha256"] != file_sha256(adapter_weights)):
+        raise ValueError("教师准入后 SFT LoRA 权重发生变化")
     if Path(student_config["model"]).resolve() != Path(args.model).resolve():
         raise ValueError("教师准入所用模型与 OPSD 模型不同")
     teacher_config = json.loads((Path(gate["teacher_eval"]) / "eval_config.json").read_text(encoding="utf-8"))
@@ -85,8 +92,14 @@ def main() -> None:
         if data_config[key] != student_config[key]:
             raise ValueError(f"OPSD 数据与教师准入评测的 {key} 不一致")
     output = Path(args.output)
-    if not output.resolve().is_relative_to(Path("../MSLoc_data/Qwen").resolve()):
+    resolved_output = output.resolve()
+    data_root = Path("../MSLoc_data/Qwen").resolve()
+    if resolved_output == data_root or not resolved_output.is_relative_to(data_root):
         raise ValueError("OPSD 输出必须位于 ../MSLoc_data/Qwen/ 下")
+    if any(path.resolve() == resolved_output or path.resolve().is_relative_to(resolved_output)
+           for path in (Path(args.model), Path(args.adapter), Path(args.dataset), gate_path,
+                        Path(gate["student_eval"]), Path(gate["teacher_eval"]))):
+        raise ValueError("OPSD 输出目录不能覆盖模型、权重、训练数据或教师预检结果")
     if args.clean and args.resume != "none":
         raise ValueError("--clean 与 --resume auto 不能同时使用")
     if args.clean and output.exists():
@@ -158,6 +171,8 @@ def main() -> None:
         "devices": devices,
         "model": str(Path(args.model).resolve()),
         "adapter": str(Path(args.adapter).resolve()),
+        "adapter_config_sha256": file_sha256(adapter / "adapter_config.json"),
+        "adapter_weights_sha256": file_sha256(adapter_weights),
         "dataset": str(Path(args.dataset).resolve()),
         "dataset_sha256": file_sha256(Path(args.dataset)),
         "teacher_gate": str(gate_path.resolve()),

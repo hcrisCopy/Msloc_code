@@ -27,7 +27,9 @@ def main() -> None:
     if output.exists() and not args.clean:
         raise FileExistsError(f"结果已存在：{output}；重算时指定 --clean")
     student_config, teacher_config = load(student_dir / "eval_config.json"), load(teacher_dir / "eval_config.json")
-    keys = ("model", "adapter", "proposals", "annotation", "video_root", "prompt_text", "frames", "max_new_tokens")
+    keys = ("model", "adapter", "adapter_config_sha256", "adapter_weights_sha256",
+            "proposals", "proposals_sha256", "annotation", "annotation_sha256",
+            "video_root", "prompt_text", "frames", "max_new_tokens")
     differences = [key for key in keys if student_config[key] != teacher_config[key]]
     if differences or student_config["teacher_prompt_file"] is not None or teacher_config["teacher_prompt_file"] is None:
         raise ValueError(f"学生与教师评测配置不匹配：{differences}")

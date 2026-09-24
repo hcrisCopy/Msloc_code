@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def checkpoint(output: Path) -> Path:
@@ -51,8 +60,12 @@ def main() -> None:
         raise ValueError("SFT 数据不是 16/8/16 版本；请重新运行 prepare_sft.py")
     output = Path(args.output)
     data_root = Path("../MSLoc_data/Qwen").resolve()
-    if not output.resolve().is_relative_to(data_root):
+    resolved_output = output.resolve()
+    if resolved_output == data_root or not resolved_output.is_relative_to(data_root):
         raise ValueError("训练输出必须位于 ../MSLoc_data/Qwen/ 下")
+    if any(path.resolve() == resolved_output or path.resolve().is_relative_to(resolved_output)
+           for path in (Path(args.model), Path(args.dataset))):
+        raise ValueError("SFT 输出目录不能覆盖模型或训练数据")
     if args.clean and args.resume != "none":
         raise ValueError("--clean 与 --resume auto 不能同时使用")
     if args.clean and output.exists():
@@ -62,11 +75,18 @@ def main() -> None:
     resume_path = checkpoint(output) if args.resume == "auto" else None
     output.mkdir(parents=True, exist_ok=True)
     sft_config_path = output / "sft_config.json"
-    sft_config = {"model": args.model, "dataset": args.dataset, "frames": 40,
-                  "sampling": "trace16_8_16"}
+    sft_config = {
+        "model": args.model, "dataset": args.dataset,
+        "dataset_sha256": file_sha256(Path(args.dataset)),
+        "frames": 40, "sampling": "trace16_8_16",
+        "devices": devices, "epochs": args.epochs,
+        "global_batch_size": args.global_batch_size,
+        "learning_rate": args.learning_rate, "max_length": args.max_length,
+        "save_steps": args.save_steps,
+    }
     if args.resume == "auto":
         if json.loads(sft_config_path.read_text(encoding="utf-8")) != sft_config:
-            raise ValueError("继续 SFT 时模型、数据集和取帧配置必须与原运行一致")
+            raise ValueError("继续 SFT 时模型、数据内容、设备和训练参数必须与原运行一致")
     else:
         sft_config_path.write_text(json.dumps(sft_config, ensure_ascii=False, indent=2), encoding="utf-8")
     env = os.environ.copy()

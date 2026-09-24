@@ -24,7 +24,8 @@ def main() -> None:
     if args.frames != 40:
         raise ValueError("Qwen 输入固定为 40 帧")
     output_dir = Path(args.output_dir)
-    if not output_dir.resolve().is_relative_to(Path("../MSLoc_data/Qwen").resolve()):
+    data_root = Path("../MSLoc_data/Qwen").resolve()
+    if output_dir.resolve() == data_root or not output_dir.resolve().is_relative_to(data_root):
         raise ValueError("训练数据输出必须位于 ../MSLoc_data/Qwen/ 下")
     output_dir.mkdir(parents=True, exist_ok=True)
     dataset_path = output_dir / "train.jsonl"

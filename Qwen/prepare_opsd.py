@@ -27,7 +27,8 @@ def main() -> None:
     if args.frames != 40:
         raise ValueError("Qwen 输入固定为 40 帧")
     output = Path(args.output_dir)
-    if not output.resolve().is_relative_to(Path("../MSLoc_data/Qwen").resolve()):
+    data_root = Path("../MSLoc_data/Qwen").resolve()
+    if output.resolve() == data_root or not output.resolve().is_relative_to(data_root):
         raise ValueError("OPSD 数据必须写入 ../MSLoc_data/Qwen/ 下")
     dataset = output / "train.jsonl"
     audit = output / "targets.jsonl"

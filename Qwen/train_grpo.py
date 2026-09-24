@@ -55,6 +55,9 @@ def main() -> None:
     model, adapter, dataset, nli_model = map(Path, (args.model, args.adapter, args.dataset, args.nli_model))
     if any(not path.is_dir() for path in (model, adapter, nli_model)) or not dataset.is_file():
         raise FileNotFoundError("模型、OPSD adapter、GRPO 数据或本地 NLI 模型缺失")
+    adapter_weights = adapter / "adapter_model.safetensors"
+    if not (adapter / "adapter_config.json").is_file() or not adapter_weights.is_file():
+        raise FileNotFoundError(f"OPSD LoRA 缺少 adapter 配置或权重：{adapter}")
     for name in ("config.json", "model.safetensors", "tokenizer.json"):
         if not (nli_model / name).is_file():
             raise FileNotFoundError(f"冻结 NLI 模型缺少 {name}：{nli_model}")
@@ -133,10 +136,12 @@ def main() -> None:
         "--report_to", "none", "--check_model", "false",
     ]
     run_config = {
-        "command": command,
+        "command": command.copy(),
         "devices": devices,
         "model": str(model.resolve()),
         "adapter": str(adapter.resolve()),
+        "adapter_config_sha256": sha256(adapter / "adapter_config.json"),
+        "adapter_weights_sha256": sha256(adapter_weights),
         "dataset": str(dataset.resolve()),
         "dataset_sha256": sha256(dataset),
         "nli_model": str(nli_model.resolve()),

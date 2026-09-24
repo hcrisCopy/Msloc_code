@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -17,6 +18,14 @@ from tqdm import tqdm
 
 from common import clip_name, clip_timestamps_path, make_clip, parse_answer, proposal_segments, read_records
 from opsd_common import proposal_target, student_message, teacher_message
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def arguments() -> argparse.Namespace:
@@ -45,6 +54,11 @@ def validate(args: argparse.Namespace) -> tuple[list[dict], list[dict]]:
         raise FileNotFoundError(args.model)
     if args.adapter != "none" and not Path(args.adapter).is_dir():
         raise FileNotFoundError(args.adapter)
+    if args.adapter != "none" and any(
+        not (Path(args.adapter) / name).is_file()
+        for name in ("adapter_config.json", "adapter_model.safetensors")
+    ):
+        raise FileNotFoundError(f"LoRA 配置或权重缺失：{args.adapter}")
     if not Path(args.prompt_file).is_file():
         raise FileNotFoundError(args.prompt_file)
     if args.teacher_prompt_file and not Path(args.teacher_prompt_file).is_file():
@@ -62,8 +76,18 @@ def launch(args: argparse.Namespace) -> None:
         raise ValueError("--devices 应为不重复的 GPU 编号")
     output = Path(args.output)
     data_root = Path("../MSLoc_data/Qwen").resolve()
-    if not output.resolve().is_relative_to(data_root):
+    resolved_output = output.resolve()
+    if resolved_output == data_root or not resolved_output.is_relative_to(data_root):
         raise ValueError("评测输出必须位于 ../MSLoc_data/Qwen/ 下")
+    protected = [Path(args.model), Path(args.proposals), Path(args.annotation), Path(args.video_root),
+                 Path(args.prompt_file)]
+    if args.adapter != "none":
+        protected.append(Path(args.adapter))
+    if args.teacher_prompt_file:
+        protected.append(Path(args.teacher_prompt_file))
+    if any(path.resolve() == resolved_output or path.resolve().is_relative_to(resolved_output)
+           for path in protected):
+        raise ValueError("评测输出目录不能覆盖模型、权重、输入数据或提示词")
     if args.clean and args.resume != "none":
         raise ValueError("--clean 与 --resume auto 不能同时使用")
     if args.clean and output.exists():
@@ -74,11 +98,20 @@ def launch(args: argparse.Namespace) -> None:
         raise FileNotFoundError(f"没有可继续的评测目录：{output}")
     output.mkdir(parents=True, exist_ok=True)
     manifest_path = output / "eval_config.json"
+    adapter_config_hash = None
+    adapter_weights_hash = None
+    if args.adapter != "none":
+        adapter_config_hash = file_sha256(Path(args.adapter) / "adapter_config.json")
+        adapter_weights_hash = file_sha256(Path(args.adapter) / "adapter_model.safetensors")
     config = {
         "model": args.model,
         "adapter": args.adapter,
+        "adapter_config_sha256": adapter_config_hash,
+        "adapter_weights_sha256": adapter_weights_hash,
         "proposals": args.proposals,
+        "proposals_sha256": file_sha256(Path(args.proposals)),
         "annotation": args.annotation,
+        "annotation_sha256": file_sha256(Path(args.annotation)),
         "video_root": args.video_root,
         "prompt_file": args.prompt_file,
         "prompt_text": Path(args.prompt_file).read_text(encoding="utf-8"),
@@ -255,9 +288,10 @@ def merge(args: argparse.Namespace, proposals: list[dict], world: int) -> None:
             decision, decision_status = "fake", "semantic_event"
         elif results and all(result["status"] == "real" for result in results):
             decision, decision_status = "real", "semantic_no_event"
+        elif not results:
+            decision, decision_status = "real", "no_proposal"
         else:
-            decision = "invalid"
-            decision_status = "format_failure" if results else "no_proposal"
+            decision, decision_status = "invalid", "format_failure"
         predictions.append({
             "video_path": video_name,
             "model_inference": {"type": decision, "segment": segments, "decision_status": decision_status},

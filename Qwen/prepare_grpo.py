@@ -106,6 +106,7 @@ def main() -> None:
     }
     count = {"fake": 0, "real": 0}
     completed = 0
+    existing_ids = []
     if args.resume == "auto":
         saved = json.loads(config_path.read_text(encoding="utf-8"))
         if any(saved.get(key) != value for key, value in config.items()) or saved.get("complete") is not False:
@@ -115,6 +116,7 @@ def main() -> None:
         with dataset_tmp.open(encoding="utf-8") as existing:
             for line in existing:
                 row = json.loads(line)
+                existing_ids.append(row["sample_id"])
                 count[row["target_kind"]] += 1
                 completed += 1
     else:
@@ -129,6 +131,8 @@ def main() -> None:
             if sample_line is None or target_line is None:
                 raise ValueError("OPSD 训练数据与目标审计行数不一致")
             if index < completed:
+                if existing_ids[index] != json.loads(target_line)["id"]:
+                    raise ValueError(f"GRPO 续建前缀与 OPSD proposal 错位：第 {index} 行")
                 continue
             sample, target = json.loads(sample_line), json.loads(target_line)
             video_name, _, proposal_index = target["id"].rpartition("::")
@@ -153,6 +157,7 @@ def main() -> None:
                 raise ValueError(f"真实片段不能有 GT 区间：{target['id']}")
             evidence = evidence_for(target["proposal"], annotations[video_name], target)
             row = {
+                "sample_id": target["id"],
                 "messages": sample["messages"],
                 "videos": sample["videos"],
                 "chat_template_kwargs": sample["chat_template_kwargs"],
