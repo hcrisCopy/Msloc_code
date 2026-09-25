@@ -41,7 +41,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--devices", required=True)
     parser.add_argument("--frames", type=int, required=True)
     parser.add_argument("--max-new-tokens", type=int, required=True)
-    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--repetition-penalty", type=float, default=1.0)
@@ -217,11 +217,14 @@ def run_worker(args: argparse.Namespace) -> None:
         if adapters:
             engine.model.set_adapter("sft")
         engine.template = get_template(engine.processor, enable_thinking=False)
-        config = RequestConfig(
-            max_tokens=args.max_new_tokens, temperature=args.temperature,
-            top_p=args.top_p, top_k=args.top_k,
-            repetition_penalty=args.repetition_penalty,
-        )
+        if args.temperature == 0:
+            config = RequestConfig(max_tokens=args.max_new_tokens, temperature=0)
+        else:
+            config = RequestConfig(
+                max_tokens=args.max_new_tokens, temperature=args.temperature,
+                top_p=args.top_p, top_k=args.top_k,
+                repetition_penalty=args.repetition_penalty,
+            )
         with shard.open("a", encoding="utf-8") as handle:
             for task_id, video_name, relative_video, index, proposal in tqdm(
                 tasks, desc=f"Qwen eval rank {rank}", unit="proposal", disable=rank != 0
