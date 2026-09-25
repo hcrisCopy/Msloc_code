@@ -136,8 +136,8 @@ def main() -> None:
         "--truncation_strategy", "delete",
         "--split_dataset_ratio", "0",
         "--save_strategy", "steps", "--save_steps", str(args.save_steps),
-        "--save_total_limit", "3", "--create_checkpoint_symlink", "true",
-        "--logging_steps", "10", "--log_completions", "true",
+        "--save_total_limit", "3", "--create_checkpoint_symlink", "false",
+        "--logging_steps", "1", "--log_completions", "true",
         "--warmup_ratio", "0.03", "--lr_scheduler_type", "cosine",
         "--gradient_checkpointing", "true",
         "--dataloader_num_workers", "4", "--dataset_num_proc", "4",
@@ -183,7 +183,13 @@ def main() -> None:
     figure.tight_layout()
     figure.savefig(output / "reward_curve.png", dpi=160)
     plt.close(figure)
-    print(f"Adapter: {output / 'last'}\nReward curve: {output / 'reward_curve.png'}")
+    last = output / "last"
+    if last.is_symlink():
+        last.unlink()
+    elif last.exists():
+        raise FileExistsError(f"不能覆盖已有的非链接目录：{last}")
+    last.symlink_to(latest_checkpoint(output).name, target_is_directory=True)
+    print(f"Adapter: {last}\nReward curve: {output / 'reward_curve.png'}")
 
 
 if __name__ == "__main__":

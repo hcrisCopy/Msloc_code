@@ -135,8 +135,8 @@ def main() -> None:
         "--save_strategy", "steps",
         "--save_steps", str(args.save_steps),
         "--save_total_limit", "3",
-        "--create_checkpoint_symlink", "true",
-        "--logging_steps", "10",
+        "--create_checkpoint_symlink", "false",
+        "--logging_steps", "1",
         "--warmup_ratio", "0.03",
         "--lr_scheduler_type", "cosine",
         "--gradient_checkpointing", "true",
@@ -168,6 +168,12 @@ def main() -> None:
     figure.tight_layout()
     figure.savefig(output / "loss_curve.png", dpi=160)
     plt.close(figure)
+    last = output / "last"
+    if last.is_symlink():
+        last.unlink()
+    elif last.exists():
+        raise FileExistsError(f"不能覆盖已有的非链接目录：{last}")
+    last.symlink_to(checkpoint(output).name, target_is_directory=True)
     print(f"Adapter: {output / 'last'}\nLoss curve: {output / 'loss_curve.png'}")
 
 
