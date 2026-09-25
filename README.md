@@ -222,7 +222,9 @@ python evaluate_long.py \
 
 第二阶段代码统一放在 `Qwen/`；以下命令均在本仓库根目录执行。使用后训练版 `Qwen/Qwen3.5-4B`，SFT、OPD/OPSD 和 GRPO 共用独立环境。
 
-本阶段训练命令中的 `--max-steps -1` 表示按 `--epochs` 跑全量。单卡短跑时，把 `--devices` 改为 `0`、`--max-steps` 改为 `10`、`--save-steps` 改为 `5`。OPSD 仍要求所用 SFT 权重通过教师预检。若以后在同一目录跑全量，需要用 `--clean` 重新开始，不能用 `--resume auto` 接续短跑。
+本阶段训练命令中的 `--max-steps -1` 表示按 `--epochs` 跑全量。单卡短跑可把 `--devices` 改为 `0`、`--max-steps` 改为 `10`、`--save-steps` 改为 `5`。OPSD 还可用 `--max-samples 256` 固定抽取 fake/real proposal；全量使用 `--max-samples -1`。短跑与全量使用不同输出目录，不能互相续训。
+
+本阶段所有 Qwen 完整生成评测（原模型、SFT、教师预检、OPSD、GRPO）统一使用贪心解码（`temperature=0`）和 256 个生成 token。SFT 全量测试发现采样解码使无效回答和定位误差增加，因此采样仅保留为可选实验。切换解码方式时使用新输出目录，不能用 `--resume auto` 接续另一种解码方式的结果。
 
 本阶段带 `--resume` 的命令首次使用 `--resume none --clean`；中断后保持其余参数不变，改用 `--resume auto` 并去掉 `--clean`。SFT、OPSD 数据准备从上次完成的视频继续，已有片段会复用；GRPO 数据准备和评测复用已完成的记录；训练从最近的 checkpoint 继续。旧版 SFT/OPSD 脚本留下的临时 JSONL 不能直接续建，首次使用新版脚本时用 `--clean` 重建数据文件，已有片段仍会复用。
 
@@ -271,8 +273,6 @@ hf download cross-encoder/nli-deberta-v3-small --local-dir ../cross-encoder/nli-
 
 ### Qwen3.5-4B 直接评测
 
-下列所有 Qwen 完整生成评测（原模型、SFT、教师预检、OPSD、GRPO）统一使用贪心解码（`temperature=0`）和 256 个生成 token。SFT 全量测试发现采样解码使无效回答和定位误差增加，因此采样仅保留为可选实验。切换解码方式时使用新输出目录，不能用 `--resume auto` 接续另一种解码方式的结果。
-
 输入第一阶段测试 proposal、待检视频和 `_0119` 测试标注。沿用 Trace 的取帧方式：每个 proposal 的前 20%、中间 60%、后 20% 分别取 16、8、16 帧。SFT、教师预检、OPSD 和正式评测共用这一设置。
 
 片段 MP4 旁的 `.timestamps.json` 以毫秒记录每帧相对 proposal 起点的时间；`Qwen/trace_video_template.py` 将它转换成 Qwen3.5 所需的帧索引和 FPS，避免非均匀帧被当成匀速视频。
@@ -297,6 +297,7 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --max-proposals -1 \
   --temperature 0 \
   --resume none \
   --clean
@@ -356,6 +357,7 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --max-proposals -1 \
   --temperature 0 \
   --resume none \
   --clean
@@ -363,7 +365,9 @@ python Qwen/evaluate.py \
 
 ### Qwen3.5-4B OPSD：教师评测与训练
 
-先在训练 proposal 上用相同的 SFT adapter、视频和学生提示词各做一次完整生成评测。预检教师沿用学生的任务说明、格式要求与示例，只额外收到当前 proposal 的片段内目标区间或“此片段 real”的文字真值，以及异常对象与类别。提示词按一或三句解释明确这些类别对应的内容，不提供标注原句。这一步用于验证初始教师，最终测试仍由不看真值的学生完成。两份评测分别写入 `../MSLoc_data/Qwen/opsd_student_precheck/` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck/`。
+OPSD 开始前，先用同一份 SFT LoRA 对训练 proposal 做两次完整生成：学生只看 40 帧片段和 `student.txt`；教师看相同片段、相同任务说明，还会通过 `teacher_precheck.txt` 得知该片段是 fake 还是 real。fake 片段另给教师片段内目标区间、异常对象和类别，指导其生成解释和定位；不提供标注原句。比较两次回答，是为了检查这些文字信息是否让初始教师表现优于学生。正式测试仍只评测不看真值的学生。以下全量命令分别输出到 `../MSLoc_data/Qwen/opsd_student_precheck/` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck/`。
+
+单卡调试时，两条命令都使用 `--devices 0 --max-proposals 256`，输出目录分别改为 `../MSLoc_data/Qwen/opsd_student_precheck_debug` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck_debug`。程序固定抽取相同的 128 个 fake 和 128 个 real proposal。抽样结果可直接比较这 256 个片段上的真假判定、fake 片段的定位 IoU 和无效回答数；它只说明教师在这批片段上的表现，不能代替全量预检，也不能据此计算整视频指标。
 
 ```bash
 python Qwen/evaluate.py \
@@ -377,6 +381,7 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --max-proposals -1 \
   --temperature 0 \
   --resume none \
   --clean
@@ -395,12 +400,13 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --max-proposals -1 \
   --temperature 0 \
   --resume none \
   --clean
 ```
 
-比较 Trace 的 `Total` 指标：教师 `Loc_F1`、`Loc_IoU` 均提高，`Det_Acc` 和无效格式数不退化，才允许训练。结果写入 `../MSLoc_data/Qwen/opsd_teacher_gate.json`。
+全量预检要求教师的整视频 `Loc_F1`、`Loc_IoU` 更高，`Det_Acc` 不降低，且逐 proposal 的 fake/real 判定与无效回答数不退化，才允许正式 OPSD。抽样预检只要求这 256 个片段上的 fake 平均 IoU 更高、真假判定和无效回答数不退化；通过后仅允许抽样短跑。逐条对比写入同名的 `_samples.jsonl`，`teacher_strictly_better` 仅供分析，不筛选训练样本。以下命令检查全量结果；调试时将三个路径分别改为对应的 `_debug` 路径。
 
 ```bash
 python Qwen/check_teacher.py \
@@ -426,7 +432,7 @@ python Qwen/prepare_opsd.py \
   --clean
 ```
 
-从 SFT 的 LoRA 继续训练。使用 ms-swift GKD/OPSD：学生在线生成；同一当前 LoRA 权重在教师特权提示词下停止梯度并提供分布监督，学生更新后教师权重也随之更新。初始教师评测未通过时程序会拒绝训练。视频 rollout 使用 Transformers 路径。单卡时只把 `--devices` 改成 `0`；续训时程序会核对原训练参数和输入文件。权重、训练曲线及续训配置写入 `../MSLoc_data/Qwen/opsd/`。
+从 SFT 的 LoRA 继续训练。使用 ms-swift GKD/OPSD：学生在线生成；同一当前 LoRA 权重在教师特权提示词下停止梯度并提供分布监督，学生更新后教师权重也随之更新。初始教师评测未通过时程序会拒绝训练。视频 rollout 使用 Transformers 路径。全量训练使用全部 fake/real proposal；单卡短跑可传 `--max-samples 256 --max-steps 10 --save-steps 5 --devices 0`，配套使用抽样预检的 gate 和独立输出目录 `../MSLoc_data/Qwen/opsd_debug`。续训时程序会核对原训练参数和输入文件。权重、训练曲线及续训配置写入 `../MSLoc_data/Qwen/opsd/`。
 
 ```bash
 python Qwen/train_opsd.py \
@@ -438,6 +444,7 @@ python Qwen/train_opsd.py \
   --devices 0,1,2,3,4,5,6,7 \
   --epochs 1 \
   --max-steps -1 \
+  --max-samples -1 \
   --global-batch-size 8 \
   --learning-rate 2e-5 \
   --max-length 8192 \
@@ -461,6 +468,7 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --max-proposals -1 \
   --temperature 0 \
   --resume none \
   --clean
@@ -519,6 +527,7 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --max-proposals -1 \
   --temperature 0 \
   --resume none \
   --clean

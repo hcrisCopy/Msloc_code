@@ -10,6 +10,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from proposal_sample import ids_sha256, select_ids
+
 
 def checkpoint(output: Path) -> Path:
     candidates = [path for path in output.glob("checkpoint-*") if path.is_dir() and path.name[11:].isdigit()]
@@ -36,6 +38,7 @@ def main() -> None:
     parser.add_argument("--devices", required=True)
     parser.add_argument("--epochs", type=int, required=True)
     parser.add_argument("--max-steps", type=int, required=True, help="-1 按 epochs 跑全量；正数用于限定更新步数")
+    parser.add_argument("--max-samples", type=int, default=-1, help="-1 全量数据；正数抽样 fake/real 用于调试")
     parser.add_argument("--global-batch-size", type=int, required=True)
     parser.add_argument("--learning-rate", type=float, required=True)
     parser.add_argument("--max-length", type=int, required=True)
@@ -53,6 +56,8 @@ def main() -> None:
         raise ValueError("epochs、长度、save-steps 和 learning-rate 必须大于 0")
     if args.max_steps != -1 and args.max_steps <= 0:
         raise ValueError("max-steps 只能是 -1 或正整数")
+    if args.max_samples != -1 and args.max_samples < 2:
+        raise ValueError("max-samples 只能是 -1 或至少 2")
     if args.max_steps > 0 and args.save_steps > args.max_steps:
         raise ValueError("短跑时 save-steps 不能大于 max-steps，训练结束前须产生 checkpoint")
     if not Path(args.model).is_dir() or not Path(args.adapter).is_dir() or not Path(args.dataset).is_file():
@@ -69,6 +74,10 @@ def main() -> None:
     gate = json.loads(gate_path.read_text(encoding="utf-8"))
     if gate["passed"] is not True:
         raise ValueError("教师完整生成评测未优于学生，不能启动 OPSD")
+    if args.max_samples == -1 and gate["max_proposals"] != -1:
+        raise ValueError("全量 OPSD 必须先完成全量教师预检；抽样准入仅供短跑调试")
+    if gate["max_proposals"] != -1 and gate["max_proposals"] != args.max_samples:
+        raise ValueError("抽样 OPSD 与抽样教师预检须使用相同 proposal 数量")
     student_config = json.loads((Path(gate["student_eval"]) / "eval_config.json").read_text(encoding="utf-8"))
     if Path(student_config["adapter"]).resolve() != Path(args.adapter).resolve():
         raise ValueError("教师准入所用 SFT adapter 与 OPSD 初始 adapter 不同")
@@ -113,6 +122,31 @@ def main() -> None:
         raise FileExistsError(f"输出目录已存在：{output}；使用 --resume auto 或 --clean")
     resume_path = checkpoint(output) if args.resume == "auto" else None
     output.mkdir(parents=True, exist_ok=True)
+    train_dataset = Path(args.dataset)
+    selected_ids = None
+    if args.max_samples != -1:
+        # train.jsonl 与 targets.jsonl 逐行对应；共用教师预检的固定抽样规则。
+        audit_path = train_dataset.parent / "targets.jsonl"
+        if not audit_path.is_file():
+            raise FileNotFoundError(audit_path)
+        samples = train_dataset.read_text(encoding="utf-8").splitlines()
+        audit = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+        if len(samples) != len(audit):
+            raise ValueError("OPSD 训练数据与目标审计行数不一致")
+        for sample, row in zip(samples, audit):
+            if json.loads(sample)["videos"] != [row["clip"]]:
+                raise ValueError(f"OPSD 训练数据与目标审计顺序不一致：{row['id']}")
+        selected_ids = select_ids([(row["id"], row["target_kind"]) for row in audit], args.max_samples)
+        if gate["max_proposals"] != -1 and gate["selected_ids_sha256"] != ids_sha256(selected_ids):
+            raise ValueError("抽样教师预检与 OPSD 数据选中的 proposal 不一致")
+        train_dataset = output / "train_sample.jsonl"
+        sample_text = "".join(sample + "\n" for sample, row in zip(samples, audit) if row["id"] in selected_ids)
+        if args.resume == "auto":
+            if not train_dataset.is_file() or train_dataset.read_text(encoding="utf-8") != sample_text:
+                raise ValueError("续训时抽样数据发生变化")
+        else:
+            train_dataset.write_text(sample_text, encoding="utf-8")
+        print(f"OPSD 抽样：{len(selected_ids)} / {len(audit)} 条 fake/real proposal", flush=True)
     env = os.environ.copy()
     env.update({
         # 数据预处理的 Unix socket 必须使用短临时路径。
@@ -132,7 +166,7 @@ def main() -> None:
         "--model", args.model,
         "--external_plugins", "Qwen/trace_video_template.py",
         "--adapters", args.adapter,
-        "--dataset", args.dataset,
+        "--dataset", str(train_dataset),
         "--output_dir", args.output,
         "--add_version", "false",
         "--tuner_type", "lora",
@@ -184,6 +218,8 @@ def main() -> None:
         "adapter_weights_sha256": file_sha256(adapter_weights),
         "dataset": str(Path(args.dataset).resolve()),
         "dataset_sha256": file_sha256(Path(args.dataset)),
+        "max_samples": args.max_samples,
+        "selected_ids_sha256": ids_sha256(selected_ids) if selected_ids is not None else None,
         "teacher_gate": str(gate_path.resolve()),
         "teacher_gate_sha256": file_sha256(gate_path),
         "data_config": data_config,

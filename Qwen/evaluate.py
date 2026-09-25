@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from common import clip_name, clip_timestamps_path, make_clip, parse_answer, proposal_segments, read_records
 from opsd_common import proposal_target, student_message, teacher_message
+from proposal_sample import ids_sha256, select_ids
 
 
 def file_sha256(path: Path) -> str:
@@ -41,6 +42,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--devices", required=True)
     parser.add_argument("--frames", type=int, required=True)
     parser.add_argument("--max-new-tokens", type=int, required=True)
+    parser.add_argument("--max-proposals", type=int, default=-1, help="-1 全量；正数抽样且包含 fake/real")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=20)
@@ -75,8 +77,26 @@ def validate(args: argparse.Namespace) -> tuple[list[dict], list[dict]]:
     return proposals, gt
 
 
+def selected_tasks(proposals: list[dict], gt_rows: list[dict], limit: int) -> tuple[list[tuple], set[str]]:
+    annotations = {row["video_path"]: row for row in gt_rows}
+    tasks = []
+    kinds = []
+    for row in proposals:
+        video_name = row["video_path"]
+        relative_video = Path(video_name)
+        if relative_video.is_absolute() or ".." in relative_video.parts:
+            raise ValueError(f"video_path 必须是视频根目录下的相对路径：{video_name}")
+        for index, segment in enumerate(proposal_segments(row)):
+            task_id = f"{video_name}::{index}"
+            tasks.append((task_id, video_name, relative_video, index, segment))
+            kinds.append((task_id, proposal_target(segment, annotations[video_name])["kind"]))
+    selected = select_ids(kinds, limit)
+    return [task for task in tasks if task[0] in selected], selected
+
+
 def launch(args: argparse.Namespace) -> None:
-    validate(args)
+    proposals, gt_rows = validate(args)
+    _, selected = selected_tasks(proposals, gt_rows, args.max_proposals)
     devices = [item.strip() for item in args.devices.split(",")]
     if not devices or any(not item.isdigit() for item in devices) or len(set(devices)) != len(devices):
         raise ValueError("--devices 应为不重复的 GPU 编号")
@@ -127,6 +147,9 @@ def launch(args: argparse.Namespace) -> None:
         "frames": args.frames,
         "sampling": "trace16_8_16",
         "max_new_tokens": args.max_new_tokens,
+        "max_proposals": args.max_proposals,
+        "selected_proposals": len(selected),
+        "selected_ids_sha256": ids_sha256(selected),
         "temperature": args.temperature,
         "top_p": args.top_p,
         "top_k": args.top_k,
@@ -154,6 +177,7 @@ def launch(args: argparse.Namespace) -> None:
         "--video-root", args.video_root, "--prompt-file", args.prompt_file,
         "--output", args.output, "--devices", args.devices,
         "--frames", str(args.frames), "--max-new-tokens", str(args.max_new_tokens),
+        "--max-proposals", str(args.max_proposals),
         "--temperature", str(args.temperature), "--top-p", str(args.top_p),
         "--top-k", str(args.top_k), "--repetition-penalty", str(args.repetition_penalty),
         "--resume", args.resume, "--worker",
@@ -189,15 +213,7 @@ def run_worker(args: argparse.Namespace) -> None:
     output = Path(args.output)
     shard = output / f"rank_{rank}.jsonl"
     completed = saved_results(shard)
-    tasks = []
-    for row in proposals:
-        video_name = row["video_path"]
-        relative_video = Path(video_name)
-        if relative_video.is_absolute() or ".." in relative_video.parts:
-            raise ValueError(f"video_path 必须是视频根目录下的相对路径：{video_name}")
-        for index, segment in enumerate(proposal_segments(row)):
-            task_id = f"{video_name}::{index}"
-            tasks.append((task_id, video_name, relative_video, index, segment))
+    tasks, selected = selected_tasks(proposals, gt_rows, args.max_proposals)
     tasks = [task for index, task in enumerate(tasks) if index % world == rank and task[0] not in completed]
     if tasks:
         from trace_video_template import register_trace_video_template
@@ -272,12 +288,12 @@ def run_worker(args: argparse.Namespace) -> None:
                 handle.flush()
     dist.barrier()
     if rank == 0:
-        merge(args, proposals, world)
+        merge(args, proposals, selected, world)
     dist.barrier()
     dist.destroy_process_group()
 
 
-def merge(args: argparse.Namespace, proposals: list[dict], world: int) -> None:
+def merge(args: argparse.Namespace, proposals: list[dict], selected: set[str], world: int) -> None:
     output = Path(args.output)
     all_results = {}
     for rank in range(world):
@@ -285,7 +301,7 @@ def merge(args: argparse.Namespace, proposals: list[dict], world: int) -> None:
             if task_id in all_results:
                 raise ValueError(f"重复评测 ID：{task_id}")
             all_results[task_id] = row
-    expected = {f"{row['video_path']}::{index}" for row in proposals for index, _ in enumerate(proposal_segments(row))}
+    expected = selected
     if set(all_results) != expected:
         raise ValueError(f"评测不完整：期望 {len(expected)} 条，实际 {len(all_results)} 条")
     predictions = []
@@ -294,7 +310,10 @@ def merge(args: argparse.Namespace, proposals: list[dict], world: int) -> None:
     invalid_ids = []
     for source in proposals:
         video_name = source["video_path"]
-        results = [all_results[f"{video_name}::{index}"] for index, _ in enumerate(proposal_segments(source))]
+        results = [all_results[f"{video_name}::{index}"] for index, _ in enumerate(proposal_segments(source))
+                   if f"{video_name}::{index}" in selected]
+        if args.max_proposals != -1 and not results:
+            continue
         for result in results:
             # 续跑时也按当前解析规则重算已有原文，避免旧的格式判定污染最终指标。
             proposal = result["proposal"]
@@ -337,16 +356,20 @@ def merge(args: argparse.Namespace, proposals: list[dict], world: int) -> None:
     summary = {
         "counts": dict(counts), "proposal_detection": dict(proposal_detection),
         "invalid_proposal_ids": invalid_ids,
+        "selected_proposals": len(selected), "max_proposals": args.max_proposals,
     }
     (output / "parse_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print("Parse:", dict(counts), flush=True)
     print("Proposal detection:", dict(proposal_detection), flush=True)
-    subprocess.run([
-        sys.executable, "evaluate_long.py",
-        "--gt_file", args.annotation,
-        "--infer_file", str(predictions_path),
-        "--output_file", str(output / "metrics.json"),
-    ], check=True)
+    if args.max_proposals == -1:
+        subprocess.run([
+            sys.executable, "evaluate_long.py",
+            "--gt_file", args.annotation,
+            "--infer_file", str(predictions_path),
+            "--output_file", str(output / "metrics.json"),
+        ], check=True)
+    else:
+        print("抽样评测只计算逐 proposal 指标；整视频指标需要全量 proposal。", flush=True)
 
 
 if __name__ == "__main__":
