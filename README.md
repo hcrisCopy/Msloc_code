@@ -271,6 +271,8 @@ hf download cross-encoder/nli-deberta-v3-small --local-dir ../cross-encoder/nli-
 
 ### Qwen3.5-4B 直接评测
 
+下列所有 Qwen 完整生成评测（原模型、SFT、教师预检、OPSD、GRPO）统一使用 `temperature=0.7`、`top_p=0.8`、`top_k=20`、`repetition_penalty=1.0` 和 256 个生成 token。每个 proposal 固定 seed 42 派生的随机状态，便于多卡和中断续跑复现。
+
 输入第一阶段测试 proposal、待检视频和 `_0119` 测试标注。沿用 Trace 的取帧方式：每个 proposal 的前 20%、中间 60%、后 20% 分别取 16、8、16 帧。SFT、教师预检、OPSD 和正式评测共用这一设置。
 
 片段 MP4 旁的 `.timestamps.json` 以毫秒记录每帧相对 proposal 起点的时间；`Qwen/trace_video_template.py` 将它转换成 Qwen3.5 所需的帧索引和 FPS，避免非均匀帧被当成匀速视频。
@@ -295,6 +297,10 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --temperature 0.7 \
+  --top-p 0.8 \
+  --top-k 20 \
+  --repetition-penalty 1.0 \
   --resume none \
   --clean
 ```
@@ -353,6 +359,10 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --temperature 0.7 \
+  --top-p 0.8 \
+  --top-k 20 \
+  --repetition-penalty 1.0 \
   --resume none \
   --clean
 ```
@@ -373,6 +383,10 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --temperature 0.7 \
+  --top-p 0.8 \
+  --top-k 20 \
+  --repetition-penalty 1.0 \
   --resume none \
   --clean
 ```
@@ -390,6 +404,10 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --temperature 0.7 \
+  --top-p 0.8 \
+  --top-k 20 \
+  --repetition-penalty 1.0 \
   --resume none \
   --clean
 ```
@@ -455,6 +473,10 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --temperature 0.7 \
+  --top-p 0.8 \
+  --top-k 20 \
+  --repetition-penalty 1.0 \
   --resume none \
   --clean
 ```
@@ -512,6 +534,10 @@ python Qwen/evaluate.py \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
+  --temperature 0.7 \
+  --top-p 0.8 \
+  --top-k 20 \
+  --repetition-penalty 1.0 \
   --resume none \
   --clean
 ```

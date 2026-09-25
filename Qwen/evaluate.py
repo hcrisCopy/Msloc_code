@@ -41,6 +41,10 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--devices", required=True)
     parser.add_argument("--frames", type=int, required=True)
     parser.add_argument("--max-new-tokens", type=int, required=True)
+    parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--top-p", type=float, default=0.8)
+    parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--repetition-penalty", type=float, default=1.0)
     parser.add_argument("--resume", choices=["none", "auto"], required=True)
     parser.add_argument("--clean", action="store_true")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
@@ -50,6 +54,8 @@ def arguments() -> argparse.Namespace:
 def validate(args: argparse.Namespace) -> tuple[list[dict], list[dict]]:
     if args.frames != 40 or args.max_new_tokens <= 0:
         raise ValueError("Qwen 输入 frames 必须是 40，max-new-tokens 必须大于 0")
+    if not 0 <= args.temperature or not 0 < args.top_p <= 1 or args.top_k <= 0 or args.repetition_penalty <= 0:
+        raise ValueError("解码参数要求 temperature >= 0、0 < top-p <= 1、top-k > 0、repetition-penalty > 0")
     if not Path(args.model).is_dir():
         raise FileNotFoundError(args.model)
     if args.adapter != "none" and not Path(args.adapter).is_dir():
@@ -121,6 +127,10 @@ def launch(args: argparse.Namespace) -> None:
         "frames": args.frames,
         "sampling": "trace16_8_16",
         "max_new_tokens": args.max_new_tokens,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "top_k": args.top_k,
+        "repetition_penalty": args.repetition_penalty,
     }
     if args.resume == "auto":
         if json.loads(manifest_path.read_text(encoding="utf-8")) != config:
@@ -144,6 +154,8 @@ def launch(args: argparse.Namespace) -> None:
         "--video-root", args.video_root, "--prompt-file", args.prompt_file,
         "--output", args.output, "--devices", args.devices,
         "--frames", str(args.frames), "--max-new-tokens", str(args.max_new_tokens),
+        "--temperature", str(args.temperature), "--top-p", str(args.top_p),
+        "--top-k", str(args.top_k), "--repetition-penalty", str(args.repetition_penalty),
         "--resume", args.resume, "--worker",
     ]
     if args.teacher_prompt_file:
@@ -205,11 +217,19 @@ def run_worker(args: argparse.Namespace) -> None:
         if adapters:
             engine.model.set_adapter("sft")
         engine.template = get_template(engine.processor, enable_thinking=False)
-        config = RequestConfig(max_tokens=args.max_new_tokens, temperature=0)
+        config = RequestConfig(
+            max_tokens=args.max_new_tokens, temperature=args.temperature,
+            top_p=args.top_p, top_k=args.top_k,
+            repetition_penalty=args.repetition_penalty,
+        )
         with shard.open("a", encoding="utf-8") as handle:
             for task_id, video_name, relative_video, index, proposal in tqdm(
                 tasks, desc=f"Qwen eval rank {rank}", unit="proposal", disable=rank != 0
             ):
+                # 每个 proposal 独立设种子，续跑和更换 GPU 数量不改变采样结果。
+                seed = 42 + int.from_bytes(hashlib.sha256(task_id.encode()).digest()[:4], "big")
+                torch.manual_seed(seed)
+                torch.cuda.manual_seed_all(seed)
                 clip = output / "clips" / relative_video.with_suffix("") / clip_name(index, proposal)
                 make_clip(Path(args.video_root) / relative_video, proposal, clip, args.frames)
                 duration = proposal[1] - proposal[0]
