@@ -315,6 +315,8 @@ python Qwen/prepare_sft.py \
   --clean
 ```
 
+这一步打印信息：`SFT samples` 是与原始标注区间相交、写入训练集的 proposal 数；`negative_excluded` 是没有交集、未用于 SFT 的 proposal 数；`multiple_gt` 是与多个原始标注区间相交的 proposal 数，已包含在 `SFT samples` 中，每条只取交集最长的一处。`train.jsonl` 是训练数据；`targets.jsonl` 同时记录所选的 proposal 内的标注区间和片段内目标区间；`clips/` 存放 40 帧片段。
+
 用 LoRA 训练 Qwen3.5-4B，关闭 thinking。单卡时只把 `--devices` 改成 `0`；程序会保持全局 batch 为 8。权重和训练曲线在 `../MSLoc_data/Qwen/sft/`。
 
 ```bash

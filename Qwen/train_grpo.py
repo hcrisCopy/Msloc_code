@@ -92,6 +92,8 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.update({
+        # 数据预处理的 Unix socket 必须使用短临时路径。
+        "TMPDIR": "/tmp",
         "CUDA_VISIBLE_DEVICES": ",".join(devices),
         "LOG_LEVEL": "INFO",
         "NPROC_PER_NODE": str(len(devices)),

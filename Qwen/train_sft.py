@@ -97,6 +97,8 @@ def main() -> None:
         sft_config_path.write_text(json.dumps(sft_config, ensure_ascii=False, indent=2), encoding="utf-8")
     env = os.environ.copy()
     env.update({
+        # multiprocess 用 Unix socket 通信；长路径下的 TMPDIR 会触发 AF_UNIX path too long。
+        "TMPDIR": "/tmp",
         "CUDA_VISIBLE_DEVICES": ",".join(devices),
         "LOG_LEVEL": "INFO",
         "NPROC_PER_NODE": str(len(devices)),
