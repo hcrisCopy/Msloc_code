@@ -442,14 +442,25 @@ python Qwen/prepare_opsd.py \
   --clean
 ```
 
-OPSD 从 SFT LoRA 开始。每一步先让学生在不看真值的情况下生成回答；教师再根据同一视频、特权提示词和学生已写出的前缀，给下一个 token 的概率。训练只更新学生 LoRA。师生共享当前 LoRA，因此下一步教师也使用更新后的权重。教师预检未通过时，程序会拒绝训练。
+先将通过预检的 SFT LoRA 合并成独立模型，作为固定教师，保存在 `../MSLoc_data/Qwen/sft_teacher/`；重复执行会复用完整产物。教师和学生从同一份 SFT 权重起步；训练中只更新学生 LoRA，教师始终保持初始权重。已生成的 OPSD 数据和教师预检结果可以复用。
 
-下面是全量训练命令，使用全部 fake/real proposal，权重和训练曲线保存在 `../MSLoc_data/Qwen/opsd/`。单卡调试时，将 `--teacher-gate` 改为 `../MSLoc_data/Qwen/opsd_teacher_gate_debug.json`，并设置 `--devices 0 --max-samples 256 --max-steps 10 --save-steps 5 --output ../MSLoc_data/Qwen/opsd_debug`。续训时保持原参数不变。
+```bash
+python Qwen/merge_sft_teacher.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/sft/last \
+  --output ../MSLoc_data/Qwen/sft_teacher \
+  --devices 0
+```
+
+每一步先让学生在不看真值的情况下生成回答；固定教师再根据同一视频、特权提示词和学生已写出的前缀，给下一个 token 的概率。教师预检未通过，或固定教师不是由预检时的 SFT 权重合并而成，程序会拒绝训练。
+
+下面是全量训练命令，使用全部 fake/real proposal，权重和训练曲线保存在 `../MSLoc_data/Qwen/opsd/`。单卡调试时，将 `--teacher-gate` 改为 `../MSLoc_data/Qwen/opsd_teacher_gate_debug.json`，并设置 `--devices 0 --max-samples 256 --max-steps 10 --save-steps 5 --output ../MSLoc_data/Qwen/opsd_debug`。续训时保持原参数不变；旧版动态教师的 checkpoint 不能接到固定教师实验。
 
 ```bash
 python Qwen/train_opsd.py \
   --model ../Qwen/Qwen3.5-4B \
   --adapter ../MSLoc_data/Qwen/sft/last \
+  --teacher-model ../MSLoc_data/Qwen/sft_teacher \
   --dataset ../MSLoc_data/Qwen/opsd_data/train.jsonl \
   --teacher-gate ../MSLoc_data/Qwen/opsd_teacher_gate.json \
   --output ../MSLoc_data/Qwen/opsd \

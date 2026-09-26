@@ -1,4 +1,4 @@
-"""基于 ms-swift 4.5.3 GKD/OPSD 继续训练 SFT LoRA；教师共享学生当前权重并读取文字真值。"""
+"""基于 ms-swift 4.5.3 GKD/OPSD 继续训练 SFT LoRA；教师固定为初始 SFT 权重。"""
 
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--adapter", required=True, help="已评测的 SFT LoRA last/checkpoint-* 目录")
+    parser.add_argument("--teacher-model", required=True, help="由 merge_sft_teacher.py 导出的独立 SFT 模型")
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--teacher-gate", required=True)
     parser.add_argument("--output", required=True)
@@ -84,6 +85,18 @@ def main() -> None:
     if (student_config["adapter_config_sha256"] != file_sha256(adapter / "adapter_config.json")
             or student_config["adapter_weights_sha256"] != file_sha256(adapter_weights)):
         raise ValueError("教师准入后 SFT LoRA 权重发生变化")
+    teacher_model = Path(args.teacher_model).resolve()
+    if teacher_model == Path(args.model).resolve() or not (teacher_model / "config.json").is_file():
+        raise ValueError("固定教师必须是独立合并的 SFT 模型，不能使用原始底座")
+    source_path = teacher_model / "teacher_source.json"
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    if (Path(source["model"]).resolve() != Path(args.model).resolve()
+            or Path(source["adapter"]).resolve() != adapter.resolve()
+            or source["adapter_config_sha256"] != file_sha256(adapter / "adapter_config.json")
+            or source["adapter_weights_sha256"] != file_sha256(adapter_weights)):
+        raise ValueError("固定教师不是从当前预检的 SFT 权重合并得到的")
+    if not list(teacher_model.glob("*.safetensors")):
+        raise FileNotFoundError(f"固定教师缺少模型权重：{teacher_model}")
     if Path(student_config["model"]).resolve() != Path(args.model).resolve():
         raise ValueError("教师准入所用模型与 OPSD 模型不同")
     teacher_config = json.loads((Path(gate["teacher_eval"]) / "eval_config.json").read_text(encoding="utf-8"))
@@ -110,8 +123,10 @@ def main() -> None:
     data_root = Path("../MSLoc_data/Qwen").resolve()
     if resolved_output == data_root or not resolved_output.is_relative_to(data_root):
         raise ValueError("OPSD 输出必须位于 ../MSLoc_data/Qwen/ 下")
+    if resolved_output.is_relative_to(teacher_model):
+        raise ValueError("OPSD 输出目录不能位于固定教师模型内部")
     if any(path.resolve() == resolved_output or path.resolve().is_relative_to(resolved_output)
-           for path in (Path(args.model), Path(args.adapter), Path(args.dataset), gate_path,
+           for path in (Path(args.model), Path(args.adapter), teacher_model, Path(args.dataset), gate_path,
                         Path(gate["student_eval"]), Path(gate["teacher_eval"]))):
         raise ValueError("OPSD 输出目录不能覆盖模型、权重、训练数据或教师预检结果")
     if args.clean and args.resume != "none":
@@ -164,6 +179,7 @@ def main() -> None:
         "swift", "rlhf",
         "--rlhf_type", "gkd",
         "--model", args.model,
+        "--teacher_model", str(teacher_model),
         "--external_plugins", "Qwen/trace_video_template.py",
         "--adapters", args.adapter,
         "--dataset", str(train_dataset),
@@ -214,6 +230,8 @@ def main() -> None:
         "devices": devices,
         "model": str(Path(args.model).resolve()),
         "adapter": str(Path(args.adapter).resolve()),
+        "teacher_model": str(teacher_model),
+        "teacher_source_sha256": file_sha256(source_path),
         "adapter_config_sha256": file_sha256(adapter / "adapter_config.json"),
         "adapter_weights_sha256": file_sha256(adapter_weights),
         "dataset": str(Path(args.dataset).resolve()),
@@ -235,7 +253,7 @@ def main() -> None:
         temporary_config.write_text(json.dumps(run_config, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary_config.replace(run_config_path)
 
-    # 不传 teacher_model：同一模型在教师特权提示词下停止梯度，随后与学生一起更新 LoRA。
+    # 独立合并的 SFT 模型作为冻结教师；只有学生 LoRA 随优化步骤更新。
     if resume_path:
         command += ["--resume_from_checkpoint", str(resume_path)]
     print("OPSD:", " ".join(command), flush=True)
