@@ -70,7 +70,7 @@ def main() -> None:
     env["CUDA_VISIBLE_DEVICES"] = ",".join(devices)
     command = ["swift", "export", "--model", str(model), "--adapters", str(adapter),
                "--merge_lora", "true", "--output_dir", str(output),
-               "--torch_dtype", "bfloat16", "--check_model", "false"]
+               "--torch_dtype", "bfloat16"]
     subprocess.run(command, env=env, check=True)
     if not (output / "config.json").is_file() or not list(output.glob("*.safetensors")):
         raise RuntimeError(f"LoRA 合并结束，但教师模型权重或配置缺失：{output}")
