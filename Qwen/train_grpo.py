@@ -137,7 +137,7 @@ def main() -> None:
         "--adapters", args.adapter,
         "--ref_adapters", args.adapter,
         "--dataset", args.dataset,
-        "--external_plugins", "Qwen/trace_video_template.py", "Qwen/grpo_rewards.py",
+        "--external_plugins", "Qwen/trace_video_template.py", "Qwen/grpo_rewards.py", "Qwen/grpo_logging.py",
         "--reward_funcs", "msloc_localization", "msloc_format", "msloc_explanation",
         "--reward_weights", "1.0", "0.1", "0.3",
         "--output_dir", args.output,
@@ -181,6 +181,11 @@ def main() -> None:
         "dataset_sha256": sha256(dataset),
         "nli_model": str(nli_model.resolve()),
         "nli_config_sha256": sha256(nli_model / "config.json"),
+        "reward_code_sha256": {
+            "grpo_rewards": sha256(Path("Qwen/grpo_rewards.py")),
+            "temporal_reward": sha256(Path("Trace/trace/opd_grpo.py")),
+            "text_explanation_reward": sha256(Path("Trace/trace/text_explanation_reward.py")),
+        },
         "data_config": data_config,
     }
     if adapter_stage == "opsd":

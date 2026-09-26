@@ -1,4 +1,4 @@
-"""ms-swift 4.5.3 GRPO 奖励插件；公式沿用 Trace 的三项奖励。"""
+"""ms-swift 4.5.3 GRPO 奖励插件；参考 Trace，解释分只奖励标注覆盖。"""
 
 from __future__ import annotations
 
@@ -87,9 +87,16 @@ class ExplanationReward(ORM):
                 )
             verdict = self.judge.score(
                 caption=parsed["explanation"],
-                evidence=SimpleNamespace(**evidence),
+                # 旧版已准备的数据可能含类别字段；NLI 只比较标注原句。
+                evidence=SimpleNamespace(
+                    object_caption=evidence["object_caption"],
+                    start_caption=evidence["start_caption"],
+                    end_caption=evidence["end_caption"],
+                ),
             )
-            scores.append(verdict.reward)
+            # 标注可能不完整：额外句子没有匹配到标注，不等于视频解释错误。
+            # 保留标注覆盖和与已匹配事实的矛盾惩罚，不使用按生成句数归一的 precision。
+            scores.append(verdict.graph_recall - 0.50 * verdict.contradiction)
         return scores
 
 

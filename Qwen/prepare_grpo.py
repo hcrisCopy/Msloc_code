@@ -46,11 +46,8 @@ def evidence_for(proposal: list[float], annotation: dict, target: dict) -> dict:
     end_ann = first_cot_entry(ann, "bnd_cot_ed")
     evidence = {
         "object_caption": str(obj.get("obj_caption", "")).strip(),
-        "object_class": str(obj.get("bnd_sub_class", "")).strip(),
         "start_caption": "" if one_sentence else str(start_ann.get("bnd_caption", "")).strip(),
-        "start_class": "" if one_sentence else str(start_ann.get("bnd_class", "")).strip(),
         "end_caption": "" if one_sentence else str(end_ann.get("bnd_caption", "")).strip(),
-        "end_class": "" if one_sentence else str(end_ann.get("bnd_class", "")).strip(),
     }
     if not evidence["object_caption"]:
         raise ValueError(f"缺少对象异常标注：{target['id']}")
