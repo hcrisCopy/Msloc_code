@@ -262,11 +262,11 @@ source Qwen/env.sh
 
 ### 模型下载
 
-环境配置后、开始任何第二阶段实验前，从本仓库根目录下载一次模型。产物是 `../Qwen/Qwen3.5-4B/`，与后续代码目录 `Qwen/` 分开：
+环境配置后、开始第二阶段实验前，从本仓库根目录下载模型。Qwen3.5-4B 保存在 `../Qwen/Qwen3.5-4B/`，GRPO 使用的 NLI 模型保存在 `../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small/`：
 
 ```bash
 hf download Qwen/Qwen3.5-4B --local-dir ../Qwen/Qwen3.5-4B
-hf download cross-encoder/nli-deberta-v3-small --local-dir ../cross-encoder/nli-deberta-v3-small
+hf download cross-encoder/nli-deberta-v3-small --local-dir ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small
 ```
 
 第二个模型是 GRPO 解释奖励使用的冻结 NLI 判别器；GRPO 开始前下载即可。
@@ -406,7 +406,9 @@ python Qwen/evaluate.py \
   --clean
 ```
 
-全量预检要求教师的整视频 `Loc_F1`、`Loc_IoU` 更高，`Det_Acc` 不降低，且逐 proposal 的 fake/real 判定与无效回答数不退化，才允许正式 OPSD。抽样预检只要求这 256 个片段上的 fake 平均 IoU 更高、真假判定和无效回答数不退化；通过后仅允许抽样短跑。逐条对比写入同名的 `_samples.jsonl`，`teacher_strictly_better` 仅供分析，不筛选训练样本。以下命令检查全量结果；调试时将三个路径分别改为对应的 `_debug` 路径。
+正式训练前，还要完成教师和学生的回答的全量比较：教师的整视频 `Loc_F1`、`Loc_IoU` 必须更高，`Det_Acc` 不降低；fake、real 片段的判断正确率和无效回答数也不能变差。检查结果写入 `../MSLoc_data/Qwen/opsd_teacher_gate.json`，逐条对比另存为 `../MSLoc_data/Qwen/opsd_teacher_gate_samples.jsonl`。逐条结果仅供分析，训练仍使用全部 proposal。README提供了全量命令
+
+抽样调试时，将两个评测目录和 gate 输出文件改为对应的 `_debug` 名称。抽样调试时，分别看 fake、real 片段的判断正确率，以及 fake 片段的平均定位 IoU 和无效回答数。若教师的平均 IoU 更高，其余三项不变差，就可以继续抽样训练。这只说明教师在抽中的片段上表现更好。
 
 ```bash
 python Qwen/check_teacher.py \
@@ -416,7 +418,13 @@ python Qwen/check_teacher.py \
   --clean
 ```
 
-把全部训练 proposal 做成 OPSD 数据，异常片段使用与 SFT 一致的单个片段内目标区间；fake 视频中未命中原始标注区间的 proposal 按 Trace 记为近邻难负例或误报，教师对这些片段给 real 真值。真实视频的误报也保留。学生消息沿用 `Qwen/prompts/student.txt`；教师在相同视频上额外看到片段真假、异常片段的片段内目标区间，以及标注的时空伪造类别、`obj`、对象 `bnd_class` 和 `bnd_sub_class`、起止边界各自的 `bnd_class`。提示词说明这些类别对应解释中的哪一句，但不提供标注原句。`teacher_precheck.txt` 用于完整生成评测，`teacher_opsd.txt` 用于学生在线生成后的逐 token 蒸馏；两者分别写真假指令，训练器将学生已经生成的 token 接在教师输入之后。数据、审计记录和片段写入 `../MSLoc_data/Qwen/opsd_data/`。
+准备 OPSD 数据时，保留第一阶段生成的全部训练 proposal。与原始伪造标注相交的片段标为 fake，目标是交集最长的一处，换算成片段内秒数；没有交集的片段标为 real，包括来自 fake 视频的误报。两类片段都参加 OPSD 训练。
+
+学生收到 40 帧片段、片段时长和 `Qwen/prompts/student.txt`。SFT 使用的 `student_sft.txt` 只要求输出异常解释和 `Interval: [start, end]`；这里的提示词还允许判断片段为 real：先用一或三句描述正常画面，第二行输出 `Real`。fake 片段仍先解释，再输出区间。
+
+教师看到与学生相同的片段和任务提示，另外得知片段真假。对于 fake 片段，教师还得到目标区间和解释线索：时空伪造类别、对象 `obj` 及其 `bnd_class`/`bnd_sub_class`、起止边界各自的 `bnd_class`。教师提示词说明这些线索应写入解释的哪一句，但不提供标注原句。
+
+`teacher_precheck.txt` 用于预检：教师从空白回答开始，独立生成解释和最终结论，供程序与学生的完整回答比较。`teacher_opsd.txt` 用于训练：学生先生成回答，教师在学生已写出的每个前缀上预测下一个 token；提示词额外说明怎样在前缀已有错误时，尽量把剩余输出引向真实标签和目标区间。教师在这一步不另写一篇完整答案。训练数据、目标记录和视频片段保存在 `../MSLoc_data/Qwen/opsd_data/`。
 
 ```bash
 python Qwen/prepare_opsd.py \
@@ -432,7 +440,9 @@ python Qwen/prepare_opsd.py \
   --clean
 ```
 
-从 SFT 的 LoRA 继续训练。使用 ms-swift GKD/OPSD：学生在线生成；同一当前 LoRA 权重在教师特权提示词下停止梯度并提供分布监督，学生更新后教师权重也随之更新。初始教师评测未通过时程序会拒绝训练。视频 rollout 使用 Transformers 路径。全量训练使用全部 fake/real proposal；单卡短跑可传 `--max-samples 256 --max-steps 10 --save-steps 5 --devices 0`，配套使用抽样预检的 gate 和独立输出目录 `../MSLoc_data/Qwen/opsd_debug`。续训时程序会核对原训练参数和输入文件。权重、训练曲线及续训配置写入 `../MSLoc_data/Qwen/opsd/`。
+OPSD 从 SFT LoRA 开始。每一步先让学生在不看真值的情况下生成回答；教师再根据同一视频、特权提示词和学生已写出的前缀，给下一个 token 的概率。训练只更新学生 LoRA。师生共享当前 LoRA，因此下一步教师也使用更新后的权重。教师预检未通过时，程序会拒绝训练。
+
+下面是全量训练命令，使用全部 fake/real proposal，权重和训练曲线保存在 `../MSLoc_data/Qwen/opsd/`。单卡调试时，将 `--teacher-gate` 改为 `../MSLoc_data/Qwen/opsd_teacher_gate_debug.json`，并设置 `--devices 0 --max-samples 256 --max-steps 10 --save-steps 5 --output ../MSLoc_data/Qwen/opsd_debug`。续训时保持原参数不变。
 
 ```bash
 python Qwen/train_opsd.py \
@@ -454,7 +464,7 @@ python Qwen/train_opsd.py \
   --clean
 ```
 
-最后用原学生提示词和测试集评测 OPSD adapter。结果写入 `../MSLoc_data/Qwen/opsd_eval/`，可与 SFT 的 `metrics.json` 直接比较。
+OPSD 训练结束后，用学生提示词和第一阶段的测试 proposal 评测新 LoRA。结果保存在 `../MSLoc_data/Qwen/opsd_eval/`；其 `metrics.json` 可与 SFT 评测结果比较。
 
 ```bash
 python Qwen/evaluate.py \
@@ -496,7 +506,7 @@ python Qwen/train_grpo.py \
   --model ../Qwen/Qwen3.5-4B \
   --adapter ../MSLoc_data/Qwen/opsd/last \
   --dataset ../MSLoc_data/Qwen/grpo_data/train.jsonl \
-  --nli-model ../cross-encoder/nli-deberta-v3-small \
+  --nli-model ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small \
   --output ../MSLoc_data/Qwen/grpo \
   --devices 0,1,2,3,4,5,6,7 \
   --epochs 1 \
