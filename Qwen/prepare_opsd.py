@@ -18,7 +18,6 @@ def main() -> None:
     parser.add_argument("--annotation", required=True)
     parser.add_argument("--video-root", required=True)
     parser.add_argument("--student-prompt-file", required=True)
-    parser.add_argument("--teacher-precheck-prompt-file", required=True)
     parser.add_argument("--teacher-opsd-prompt-file", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--frames", type=int, required=True)
@@ -32,10 +31,7 @@ def main() -> None:
     if output.resolve() == data_root or not output.resolve().is_relative_to(data_root):
         raise ValueError("OPSD 数据必须写入 ../MSLoc_data/Qwen/ 下")
     student_prompt = Path(args.student_prompt_file).read_text(encoding="utf-8").strip()
-    teacher_precheck_prompt = Path(args.teacher_precheck_prompt_file).read_text(encoding="utf-8").strip()
     teacher_opsd_prompt = Path(args.teacher_opsd_prompt_file).read_text(encoding="utf-8").strip()
-    if teacher_precheck_prompt == teacher_opsd_prompt:
-        raise ValueError("教师预检与 OPSD 训练须使用不同提示词文件")
     annotations = {row["video_path"]: row for row in read_records(args.annotation)}
     proposals = read_records(args.proposals)
     if set(annotations) != {row["video_path"] for row in proposals}:
@@ -47,7 +43,6 @@ def main() -> None:
         "annotation_sha256": sha256(Path(args.annotation)),
         "video_root": str(Path(args.video_root).resolve()),
         "student_prompt_text": student_prompt,
-        "teacher_precheck_prompt_text": teacher_precheck_prompt,
         "teacher_opsd_prompt_text": teacher_opsd_prompt,
         "frames": args.frames,
         "sampling": "trace16_8_16",
@@ -123,7 +118,6 @@ def main() -> None:
         "proposals": args.proposals,
         "annotation": args.annotation,
         "student_prompt_text": student_prompt,
-        "teacher_precheck_prompt_text": teacher_precheck_prompt,
         "teacher_opsd_prompt_text": teacher_opsd_prompt,
         "frames": args.frames,
         "sampling": "trace16_8_16",

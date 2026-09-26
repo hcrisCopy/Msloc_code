@@ -6,7 +6,7 @@ import hashlib
 
 
 def select_ids(items: list[tuple[str, str]], limit: int) -> set[str]:
-    """按 seed 42 固定抽取相同数量的 fake/real；-1 表示全量。"""
+    """按全量 proposal 的 fake/real 比例和 seed 42 固定抽样；-1 表示全量。"""
     ids = [item_id for item_id, _ in items]
     if len(ids) != len(set(ids)):
         raise ValueError("proposal ID 重复")
@@ -19,13 +19,15 @@ def select_ids(items: list[tuple[str, str]], limit: int) -> set[str]:
         if kind not in by_kind:
             raise ValueError(f"未知片段类别：{kind}")
         by_kind[kind].append(item_id)
-    fake_count = min(len(by_kind["fake"]), max(1, limit // 2))
-    real_count = limit - fake_count
-    if real_count > len(by_kind["real"]):
-        real_count = len(by_kind["real"])
-        fake_count = limit - real_count
-    if fake_count < 1 or real_count < 1 or fake_count > len(by_kind["fake"]):
+    fake_total, real_total = len(by_kind["fake"]), len(by_kind["real"])
+    if fake_total == 0 or real_total == 0:
         raise ValueError("抽样必须同时包含 fake 和 real proposal")
+    # 按实际比例取最接近的整数，并保证调试样本覆盖两类片段。
+    proportional_fake = (limit * fake_total + len(items) // 2) // len(items)
+    min_fake = max(1, limit - real_total)
+    max_fake = min(fake_total, limit - 1)
+    fake_count = min(max(proportional_fake, min_fake), max_fake)
+    real_count = limit - fake_count
 
     def rank(item_id: str) -> bytes:
         return hashlib.sha256(f"42:{item_id}".encode("utf-8")).digest()

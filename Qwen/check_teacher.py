@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -78,6 +79,14 @@ def load(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--student-eval", required=True)
@@ -130,6 +139,10 @@ def main() -> None:
         "teacher": {"Total": teacher_total, "proposal": teacher_paired},
         "student_eval": str(student_dir),
         "teacher_eval": str(teacher_dir),
+        "student_eval_config_sha256": file_sha256(student_dir / "eval_config.json"),
+        "teacher_eval_config_sha256": file_sha256(teacher_dir / "eval_config.json"),
+        "student_eval_predictions_sha256": file_sha256(student_dir / "predictions.json"),
+        "teacher_eval_predictions_sha256": file_sha256(teacher_dir / "predictions.json"),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     detail_path = output.with_name(output.stem + "_samples.jsonl")

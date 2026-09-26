@@ -11,6 +11,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from opsd_teacher_filter import filter_samples, teacher_results
 from proposal_sample import ids_sha256, select_ids
 
 
@@ -43,7 +44,9 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=-1, help="-1 全量数据；正数抽样 fake/real 用于调试")
     parser.add_argument("--global-batch-size", type=int, required=True)
     parser.add_argument("--learning-rate", type=float, required=True)
-    parser.add_argument("--pointwise-clip", type=float, required=True, help="正向 KL 每个词表项贡献的上限；0 表示不裁剪")
+    parser.add_argument("--beta", type=float, required=True, help="JSD 的混合系数；正式训练使用 0.5")
+    parser.add_argument("--teacher-min-iou", type=float, required=True,
+                        help="fake 片段教师回答与目标区间的最低 IoU；正式训练使用 0.5")
     parser.add_argument("--max-length", type=int, required=True)
     parser.add_argument("--max-completion-length", type=int, required=True)
     parser.add_argument("--save-steps", type=int, required=True)
@@ -57,8 +60,10 @@ def main() -> None:
         raise ValueError("global-batch-size 必须是正数且能被 GPU 数整除")
     if min(args.epochs, args.max_length, args.max_completion_length, args.save_steps) <= 0 or args.learning_rate <= 0:
         raise ValueError("epochs、长度、save-steps 和 learning-rate 必须大于 0")
-    if not math.isfinite(args.pointwise_clip) or args.pointwise_clip < 0:
-        raise ValueError("pointwise-clip 必须是非负有限数；0 表示不裁剪")
+    if not math.isfinite(args.beta) or not 0 < args.beta < 1:
+        raise ValueError("--beta 必须在 0 和 1 之间；正式 JSD 训练使用 0.5")
+    if not math.isfinite(args.teacher_min_iou) or not 0 < args.teacher_min_iou <= 1:
+        raise ValueError("--teacher-min-iou 必须在 0 和 1 之间，包含 1")
     if args.max_steps != -1 and args.max_steps <= 0:
         raise ValueError("max-steps 只能是 -1 或正整数")
     if args.max_samples != -1 and args.max_samples < 2:
@@ -79,6 +84,12 @@ def main() -> None:
     gate = json.loads(gate_path.read_text(encoding="utf-8"))
     if gate["passed"] is not True:
         raise ValueError("教师完整生成评测未优于学生，不能启动 OPSD")
+    for role in ("student", "teacher"):
+        evaluation = Path(gate[f"{role}_eval"])
+        for name, filename in (("config", "eval_config.json"), ("predictions", "predictions.json")):
+            key = f"{role}_eval_{name}_sha256"
+            if gate.get(key) != file_sha256(evaluation / filename):
+                raise ValueError(f"{role} 预检结果与教师准入记录不一致；请重新运行 check_teacher.py")
     if args.max_samples == -1 and gate["max_proposals"] != -1:
         raise ValueError("全量 OPSD 必须先完成全量教师预检；抽样准入仅供短跑调试")
     if gate["max_proposals"] != -1 and gate["max_proposals"] != args.max_samples:
@@ -115,10 +126,10 @@ def main() -> None:
         raise ValueError("OPSD 数据不是 16/8/16 版本；请重新运行 prepare_opsd.py")
     if data_config["student_prompt_text"] != student_config["prompt_text"].strip():
         raise ValueError("OPSD 学生提示词与教师准入评测不一致")
-    if data_config["teacher_precheck_prompt_text"] != teacher_config["teacher_prompt_text"].strip():
-        raise ValueError("OPSD 记录的教师预检提示词与教师准入评测不一致")
-    if not data_config["teacher_opsd_prompt_text"]:
-        raise ValueError("OPSD 训练教师提示词不能为空")
+    if (teacher_config["teacher_prompt_file"] is None
+            or not isinstance(teacher_config["teacher_prompt_text"], str)
+            or teacher_config["teacher_prompt_text"].strip() != data_config["teacher_opsd_prompt_text"]):
+        raise ValueError("教师预检和 OPSD 训练必须使用同一份教师提示词")
     for key in ("proposals", "annotation", "frames"):
         if data_config[key] != student_config[key]:
             raise ValueError(f"OPSD 数据与教师准入评测的 {key} 不一致")
@@ -141,31 +152,35 @@ def main() -> None:
         raise FileExistsError(f"输出目录已存在：{output}；使用 --resume auto 或 --clean")
     resume_path = checkpoint(output) if args.resume == "auto" else None
     output.mkdir(parents=True, exist_ok=True)
-    train_dataset = Path(args.dataset)
-    selected_ids = None
-    if args.max_samples != -1:
-        # train.jsonl 与 targets.jsonl 逐行对应；共用教师预检的固定抽样规则。
-        audit_path = train_dataset.parent / "targets.jsonl"
-        if not audit_path.is_file():
-            raise FileNotFoundError(audit_path)
-        samples = train_dataset.read_text(encoding="utf-8").splitlines()
-        audit = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
-        if len(samples) != len(audit):
-            raise ValueError("OPSD 训练数据与目标审计行数不一致")
-        for sample, row in zip(samples, audit):
-            if json.loads(sample)["videos"] != [row["clip"]]:
-                raise ValueError(f"OPSD 训练数据与目标审计顺序不一致：{row['id']}")
-        selected_ids = select_ids([(row["id"], row["target_kind"]) for row in audit], args.max_samples)
-        if gate["max_proposals"] != -1 and gate["selected_ids_sha256"] != ids_sha256(selected_ids):
-            raise ValueError("抽样教师预检与 OPSD 数据选中的 proposal 不一致")
-        train_dataset = output / "train_sample.jsonl"
-        sample_text = "".join(sample + "\n" for sample, row in zip(samples, audit) if row["id"] in selected_ids)
+    # 训练教师提示词已对同批 proposal 贪心生成；逐条核对其回答，再建立训练数据。
+    source_dataset = Path(args.dataset)
+    audit_path = source_dataset.parent / "targets.jsonl"
+    if not audit_path.is_file():
+        raise FileNotFoundError(audit_path)
+    samples = source_dataset.read_text(encoding="utf-8").splitlines()
+    audit = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    selected_ids = select_ids([(row["id"], row["target_kind"]) for row in audit], args.max_samples)
+    if gate["max_proposals"] != -1 and gate["selected_ids_sha256"] != ids_sha256(selected_ids):
+        raise ValueError("抽样教师预检与 OPSD 数据选中的 proposal 不一致")
+    teacher_predictions_path = Path(gate["teacher_eval"]) / "predictions.json"
+    expected_teacher_ids = (selected_ids if gate["max_proposals"] != -1
+                            else {row["id"] for row in audit})
+    filtered_text, decision_text, filter_summary = filter_samples(
+        samples, audit, teacher_results(teacher_predictions_path), selected_ids,
+        expected_teacher_ids, args.teacher_min_iou)
+    train_dataset = output / "train_teacher_filtered.jsonl"
+    decision_path = output / "teacher_filter.jsonl"
+    summary_path = output / "teacher_filter_summary.json"
+    summary_text = json.dumps(filter_summary, ensure_ascii=False, indent=2)
+    for path, content in ((train_dataset, filtered_text), (decision_path, decision_text),
+                          (summary_path, summary_text)):
         if args.resume == "auto":
-            if not train_dataset.is_file() or train_dataset.read_text(encoding="utf-8") != sample_text:
-                raise ValueError("续训时抽样数据发生变化")
+            if not path.is_file() or path.read_text(encoding="utf-8") != content:
+                raise ValueError(f"续训时教师筛选结果发生变化：{path}")
         else:
-            train_dataset.write_text(sample_text, encoding="utf-8")
-        print(f"OPSD 抽样：{len(selected_ids)} / {len(audit)} 条 fake/real proposal", flush=True)
+            path.write_text(content, encoding="utf-8")
+    print(f"OPSD 教师逐条筛选：{filter_summary['selected']} -> {filter_summary['retained']}；"
+          f"排除 {filter_summary['excluded']}。记录：{decision_path}", flush=True)
     env = os.environ.copy()
     env.update({
         # 数据预处理的 Unix socket 必须使用短临时路径。
@@ -177,15 +192,16 @@ def main() -> None:
         "FPS_MAX_FRAMES": str(data_config["frames"]),
         "VIDEO_MAX_TOKEN_NUM": "128",
         "WANDB_DISABLED": "true",
-        "MSLOC_OPSD_POINTWISE_CLIP": str(args.pointwise_clip),
         "TOKENIZERS_PARALLELISM": "false",
     })
+    # ms-swift 4.5.3 GKD 原生支持 0 < beta < 1 的 JSD。保留完整词表，
+    # 使 Real、Interval 和时间数字也参与师生分布匹配。
     command = [
         "swift", "rlhf",
         "--rlhf_type", "gkd",
         "--model", args.model,
         "--teacher_model", str(teacher_model),
-        "--external_plugins", "Qwen/trace_video_template.py", "Qwen/opsd_pointwise_clip.py",
+        "--external_plugins", "Qwen/trace_video_template.py",
         "--adapters", args.adapter,
         "--dataset", str(train_dataset),
         "--output_dir", args.output,
@@ -201,7 +217,7 @@ def main() -> None:
         "--enable_thinking", "false",
         "--add_non_thinking_prefix", "true",
         "--lmbda", "1.0",
-        "--beta", "0.0",
+        "--beta", str(args.beta),
         "--temperature", "1.0",
         "--sft_alpha", "0",
         "--use_vllm", "false",
@@ -242,11 +258,17 @@ def main() -> None:
         "dataset": str(Path(args.dataset).resolve()),
         "dataset_sha256": file_sha256(Path(args.dataset)),
         "max_samples": args.max_samples,
-        "selected_ids_sha256": ids_sha256(selected_ids) if selected_ids is not None else None,
+        "selected_ids_sha256": ids_sha256(selected_ids),
         "teacher_gate": str(gate_path.resolve()),
         "teacher_gate_sha256": file_sha256(gate_path),
-        "pointwise_clip": args.pointwise_clip,
-        "pointwise_clip_plugin_sha256": file_sha256(Path("Qwen/opsd_pointwise_clip.py")),
+        "teacher_eval_predictions_sha256": file_sha256(teacher_predictions_path),
+        "teacher_min_iou": args.teacher_min_iou,
+        "teacher_filter_sha256": file_sha256(decision_path),
+        "filtered_dataset_sha256": file_sha256(train_dataset),
+        "teacher_filter_summary": filter_summary,
+        "teacher_filter_code_sha256": file_sha256(Path("Qwen/opsd_teacher_filter.py")),
+        "divergence": "jsd",
+        "beta": args.beta,
         "data_config": data_config,
         "sft_config": sft_config,
     }
@@ -276,7 +298,7 @@ def main() -> None:
 
     figure, axis = plt.subplots(figsize=(8, 4))
     axis.plot([step for step, _ in points], [loss for _, loss in points])
-    axis.set(xlabel="Step", ylabel="GKD loss", title="Qwen3.5-4B OPSD")
+    axis.set(xlabel="Step", ylabel="JSD loss", title="Qwen3.5-4B OPSD")
     axis.grid(alpha=0.25)
     figure.tight_layout()
     figure.savefig(output / "loss_curve.png", dpi=160)

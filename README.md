@@ -365,9 +365,9 @@ python Qwen/evaluate.py \
 
 ### Qwen3.5-4B OPSD：教师评测与训练
 
-OPSD 开始前，先用同一份 SFT LoRA 对训练 proposal 做两次完整生成：学生只看 40 帧片段和 `student.txt`；教师看相同片段、相同任务说明，还会通过 `teacher_precheck.txt` 得知该片段是 fake 还是 real。fake 片段另给教师片段内目标区间、异常对象和类别，指导其生成解释和定位；不提供标注原句。比较两次回答，是为了检查这些文字信息是否让初始教师表现优于学生。正式测试仍只评测不看真值的学生。以下全量命令分别输出到 `../MSLoc_data/Qwen/opsd_student_precheck/` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck/`。
+OPSD 开始前，先用同一份 SFT LoRA 对训练 proposal 做两次完整生成：学生只看 40 帧片段和 `student.txt`；教师看相同片段、相同任务说明，还会通过训练时的 `teacher_opsd.txt` 得知该片段是 fake 还是 real。fake 片段另给教师片段内目标区间、异常对象和类别，指导其生成解释和定位；不提供标注原句。教师这次完整生成既用于和学生比较整体表现，也用于训练前逐条筛选。正式测试仍只评测不看真值的学生。以下全量命令分别输出到 `../MSLoc_data/Qwen/opsd_student_precheck/` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck/`。
 
-单卡调试时，两条命令都使用 `--devices 0 --max-proposals 256`，输出目录分别改为 `../MSLoc_data/Qwen/opsd_student_precheck_debug` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck_debug`。程序固定抽取相同的 128 个 fake 和 128 个 real proposal。抽样结果可直接比较这 256 个片段上的真假判定、fake 片段的定位 IoU 和无效回答数；它只说明教师在这批片段上的表现，不能代替全量预检，也不能据此计算整视频指标。
+单卡调试时，两条命令都使用 `--devices 0 --max-proposals 256`，输出目录分别改为 `../MSLoc_data/Qwen/opsd_student_precheck_debug` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck_debug`。抽样沿用训练 proposal 的 fake/real 比例：当前全量为 5886/1111，256 条抽出 215 fake、41 real。两次预检和后续调试训练使用同一批片段。抽样结果可比较这批片段上的真假判定、fake 片段的定位 IoU 和无效回答数；它不能代替全量预检，也不能据此计算整视频指标。
 
 ```bash
 python Qwen/evaluate.py \
@@ -395,7 +395,7 @@ python Qwen/evaluate.py \
   --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --prompt-file Qwen/prompts/student.txt \
-  --teacher-prompt-file Qwen/prompts/teacher_precheck.txt \
+  --teacher-prompt-file Qwen/prompts/teacher_opsd.txt \
   --output ../MSLoc_data/Qwen/opsd_teacher_precheck \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
@@ -406,7 +406,7 @@ python Qwen/evaluate.py \
   --clean
 ```
 
-正式训练前，还要完成教师和学生的回答的全量比较：教师的整视频 `Loc_F1`、`Loc_IoU` 必须更高，`Det_Acc` 不降低；fake、real 片段的判断正确率和无效回答数也不能变差。检查结果写入 `../MSLoc_data/Qwen/opsd_teacher_gate.json`，逐条对比另存为 `../MSLoc_data/Qwen/opsd_teacher_gate_samples.jsonl`。逐条结果仅供分析，训练仍使用全部 proposal。README提供了全量命令
+正式训练前，还要完成教师和学生的回答的全量比较：教师的整视频 `Loc_F1`、`Loc_IoU` 必须更高，`Det_Acc` 不降低；fake、real 片段的判断正确率和无效回答数也不能变差。检查结果写入 `../MSLoc_data/Qwen/opsd_teacher_gate.json`，逐条对比另存为 `../MSLoc_data/Qwen/opsd_teacher_gate_samples.jsonl`。下面是全量命令。
 
 抽样调试时，将两个评测目录和 gate 输出文件改为对应的 `_debug` 名称。抽样调试时，分别看 fake、real 片段的判断正确率，以及 fake 片段的平均定位 IoU 和无效回答数。若教师的平均 IoU 更高，其余三项不变差，就可以继续抽样训练。这只说明教师在抽中的片段上表现更好。
 
@@ -418,15 +418,13 @@ python Qwen/check_teacher.py \
   --clean
 ```
 
-准备 OPSD 数据时，保留第一阶段生成的全部训练 proposal。与原始伪造标注相交的片段标为 fake，目标是交集最长的一处，换算成片段内秒数；没有交集的片段标为 real，包括来自 fake 视频的误报。两类片段都参加 OPSD 训练。
-
-> 先用全部训练 proposal ：预检比较的是教师和学生各自从头生成的完整回答，而 OPSD 训练时教师沿学生已经生成的前缀提供逐 token 监督；教师某次完整回答出错，不等于它在该样本的学生前缀上也无法提供有效监督。因此暂不按预检结果逐条筛选。
+准备 OPSD 数据时，先记录第一阶段生成的全部训练 proposal。与原始伪造标注相交的片段标为 fake，目标是交集最长的一处，换算成片段内秒数；没有交集的片段标为 real，包括来自 fake 视频的误报。训练启动前再用训练教师提示词的逐条回答筛选这些片段。
 
 学生收到 40 帧片段、片段时长和 `Qwen/prompts/student.txt`。SFT 使用的 `student_sft.txt` 只要求输出异常解释和 `Interval: [start, end]`；这里的提示词还允许判断片段为 real：先用一或三句描述正常画面，第二行输出 `Real`。fake 片段仍先解释，再输出区间。
 
 教师看到与学生相同的片段和任务提示，另外得知片段真假。对于 fake 片段，教师还得到目标区间和解释线索：时空伪造类别、对象 `obj` 及其 `bnd_class`/`bnd_sub_class`、起止边界各自的 `bnd_class`。教师提示词说明这些线索应写入解释的哪一句，但不提供标注原句。
 
-`teacher_precheck.txt` 用于预检：教师从空白回答开始，独立生成解释和最终结论，供程序与学生的完整回答比较。`teacher_opsd.txt` 用于训练：学生先生成回答，教师在学生已写出的每个前缀上预测下一个 token；提示词额外说明怎样在前缀已有错误时，尽量把剩余输出引向真实标签和目标区间。教师在这一步不另写一篇完整答案。训练数据、目标记录和视频片段保存在 `../MSLoc_data/Qwen/opsd_data/`。
+预检和训练都使用 `teacher_opsd.txt`。提示词明确区分两种情况：尚无回答时，教师从头生成完整的两行答案；已有学生前缀时，教师只考虑怎样续写。训练时教师在学生已写出的每个前缀上预测下一个 token，不另写一篇完整答案。例子说明前缀已有错误时怎样尽量把剩余输出引向真实标签和目标区间。训练数据、目标记录和视频片段保存在 `../MSLoc_data/Qwen/opsd_data/`。
 
 ```bash
 python Qwen/prepare_opsd.py \
@@ -434,7 +432,6 @@ python Qwen/prepare_opsd.py \
   --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --student-prompt-file Qwen/prompts/student.txt \
-  --teacher-precheck-prompt-file Qwen/prompts/teacher_precheck.txt \
   --teacher-opsd-prompt-file Qwen/prompts/teacher_opsd.txt \
   --output-dir ../MSLoc_data/Qwen/opsd_data \
   --frames 40 \
@@ -442,7 +439,7 @@ python Qwen/prepare_opsd.py \
   --clean
 ```
 
-先将通过预检的 SFT LoRA 合并成独立模型，作为固定教师，保存在 `../MSLoc_data/Qwen/sft_teacher/`；重复执行会复用完整产物。教师和学生从同一份 SFT 权重起步；训练中只更新学生 LoRA，教师始终保持初始权重。已生成的 OPSD 数据和教师预检结果可以复用。
+先将通过预检的 SFT LoRA 合并成独立模型，作为固定教师，保存在 `../MSLoc_data/Qwen/sft_teacher/`；重复执行会复用完整产物。教师和学生从同一份 SFT 权重起步；训练中只更新学生 LoRA，教师始终保持初始权重。同一版提示词生成的数据和评测结果可以复用。
 
 ```bash
 python Qwen/merge_sft_teacher.py \
@@ -452,9 +449,11 @@ python Qwen/merge_sft_teacher.py \
   --devices 0
 ```
 
-每一步先让学生在不看真值的情况下生成回答；固定教师再根据同一视频、特权提示词和学生已写出的前缀，给下一个 token 的概率。下面先用正向 KL、不裁剪词表项来训练。教师预检未通过，或固定教师不是由预检时的 SFT 权重合并而成，程序会拒绝训练。
+训练脚本复用教师预检时用 `teacher_opsd.txt` 生成的完整回答，逐条筛选 proposal：real 片段必须输出 `Real`；fake 片段必须输出有效区间，且与片段内目标区间的 IoU 至少为 `0.5`。格式错误、真假判错和 fake 定位不足的片段会被排除。筛选结果写入 `../MSLoc_data/Qwen/opsd/teacher_filter.jsonl` 和 `teacher_filter_summary.json`，实际训练数据写入同目录的 `train_teacher_filtered.jsonl`。
 
-下面是全量训练命令，使用全部 fake/real proposal，权重和训练曲线保存在 `../MSLoc_data/Qwen/opsd/`。单卡调试时，将 `--teacher-gate` 改为 `../MSLoc_data/Qwen/opsd_teacher_gate_debug.json`，并设置 `--devices 0 --max-samples 256 --max-steps 10 --save-steps 5`。新的 KL 方向和裁剪不能续接旧 OPSD checkpoint；重跑时使用下方的 `--resume none --clean`。
+每一步先让学生在不看真值的情况下生成回答；固定教师再根据同一视频、特权提示词和学生已写出的前缀，给下一个 token 的概率。训练使用 JSD（`--beta 0.5`），比较师生在完整词表上的下一 token 分布。教师预检未通过，或固定教师不是由预检时的 SFT 权重合并而成，程序会拒绝训练。
+
+下面是全量训练命令，先检查全部训练 proposal，再使用通过教师逐条筛选的 fake/real 片段。权重和训练曲线保存在 `../MSLoc_data/Qwen/opsd/`。单卡调试时，将 `--teacher-gate` 改为对应的 `_debug` 路径，并设置 `--devices 0 --max-samples 256 --max-steps 32 --save-steps 8`；256 指筛选前的片段数。筛选后的数据不能续接旧 OPSD checkpoint；重跑时使用下方的 `--resume none --clean`。
 
 ```bash
 python Qwen/train_opsd.py \
@@ -470,15 +469,14 @@ python Qwen/train_opsd.py \
   --max-samples -1 \
   --global-batch-size 8 \
   --learning-rate 2e-5 \
-  --pointwise-clip 0 \
+  --beta 0.5 \
+  --teacher-min-iou 0.5 \
   --max-length 8192 \
   --max-completion-length 256 \
   --save-steps 100 \
   --resume none \
   --clean
 ```
-
-> 若要比较 OPSD 作者的裁剪，再用相同数据和训练参数单独运行一次，将 `--pointwise-clip` 设为 `1e-6`，`--output` 设为 `../MSLoc_data/Qwen/opsd_clip`；评测时把 adapter 和输出目录分别改为 `../MSLoc_data/Qwen/opsd_clip/last`、`../MSLoc_data/Qwen/opsd_clip_eval`。裁剪作用于所有词表项，可能也减弱 `Real` 和时间数字的训练信号，因此以两次评测的真假判定和定位结果选择配置。裁剪后的 loss 可能小于 0。
 
 OPSD 训练结束后，用学生提示词和第一阶段的测试 proposal 评测新 LoRA。结果保存在 `../MSLoc_data/Qwen/opsd_eval/`；其 `metrics.json` 可与 SFT 评测结果比较。
 
