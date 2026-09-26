@@ -452,9 +452,9 @@ python Qwen/merge_sft_teacher.py \
   --devices 0
 ```
 
-每一步先让学生在不看真值的情况下生成回答；固定教师再根据同一视频、特权提示词和学生已写出的前缀，给下一个 token 的概率。教师预检未通过，或固定教师不是由预检时的 SFT 权重合并而成，程序会拒绝训练。
+每一步先让学生在不看真值的情况下生成回答；固定教师再根据同一视频、特权提示词和学生已写出的前缀，给下一个 token 的概率。下面先用正向 KL、不裁剪词表项来训练。教师预检未通过，或固定教师不是由预检时的 SFT 权重合并而成，程序会拒绝训练。
 
-下面是全量训练命令，使用全部 fake/real proposal，权重和训练曲线保存在 `../MSLoc_data/Qwen/opsd/`。单卡调试时，将 `--teacher-gate` 改为 `../MSLoc_data/Qwen/opsd_teacher_gate_debug.json`，并设置 `--devices 0 --max-samples 256 --max-steps 10 --save-steps 5 --output ../MSLoc_data/Qwen/opsd_debug`。续训时保持原参数不变；旧版动态教师的 checkpoint 不能接到固定教师实验。
+下面是全量训练命令，使用全部 fake/real proposal，权重和训练曲线保存在 `../MSLoc_data/Qwen/opsd/`。单卡调试时，将 `--teacher-gate` 改为 `../MSLoc_data/Qwen/opsd_teacher_gate_debug.json`，并设置 `--devices 0 --max-samples 256 --max-steps 10 --save-steps 5 --output ../MSLoc_data/Qwen/opsd_debug`。新的 KL 方向和裁剪不能续接旧 OPSD checkpoint；重跑时使用下方的 `--resume none --clean`。
 
 ```bash
 python Qwen/train_opsd.py \
@@ -470,12 +470,15 @@ python Qwen/train_opsd.py \
   --max-samples -1 \
   --global-batch-size 8 \
   --learning-rate 2e-5 \
+  --pointwise-clip 0 \
   --max-length 8192 \
   --max-completion-length 256 \
   --save-steps 100 \
   --resume none \
   --clean
 ```
+
+> 若要比较 OPSD 作者的裁剪，再用相同数据和训练参数单独运行一次，将 `--pointwise-clip` 设为 `1e-6`，`--output` 设为 `../MSLoc_data/Qwen/opsd_clip`；评测时把 adapter 和输出目录分别改为 `../MSLoc_data/Qwen/opsd_clip/last`、`../MSLoc_data/Qwen/opsd_clip_eval`。裁剪作用于所有词表项，可能也减弱 `Real` 和时间数字的训练信号，因此以两次评测的真假判定和定位结果选择配置。裁剪后的 loss 可能小于 0。
 
 OPSD 训练结束后，用学生提示词和第一阶段的测试 proposal 评测新 LoRA。结果保存在 `../MSLoc_data/Qwen/opsd_eval/`；其 `metrics.json` 可与 SFT 评测结果比较。
 

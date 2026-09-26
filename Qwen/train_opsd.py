@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -42,6 +43,7 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int, default=-1, help="-1 全量数据；正数抽样 fake/real 用于调试")
     parser.add_argument("--global-batch-size", type=int, required=True)
     parser.add_argument("--learning-rate", type=float, required=True)
+    parser.add_argument("--pointwise-clip", type=float, required=True, help="正向 KL 每个词表项贡献的上限；0 表示不裁剪")
     parser.add_argument("--max-length", type=int, required=True)
     parser.add_argument("--max-completion-length", type=int, required=True)
     parser.add_argument("--save-steps", type=int, required=True)
@@ -55,6 +57,8 @@ def main() -> None:
         raise ValueError("global-batch-size 必须是正数且能被 GPU 数整除")
     if min(args.epochs, args.max_length, args.max_completion_length, args.save_steps) <= 0 or args.learning_rate <= 0:
         raise ValueError("epochs、长度、save-steps 和 learning-rate 必须大于 0")
+    if not math.isfinite(args.pointwise_clip) or args.pointwise_clip < 0:
+        raise ValueError("pointwise-clip 必须是非负有限数；0 表示不裁剪")
     if args.max_steps != -1 and args.max_steps <= 0:
         raise ValueError("max-steps 只能是 -1 或正整数")
     if args.max_samples != -1 and args.max_samples < 2:
@@ -173,6 +177,7 @@ def main() -> None:
         "FPS_MAX_FRAMES": str(data_config["frames"]),
         "VIDEO_MAX_TOKEN_NUM": "128",
         "WANDB_DISABLED": "true",
+        "MSLOC_OPSD_POINTWISE_CLIP": str(args.pointwise_clip),
         "TOKENIZERS_PARALLELISM": "false",
     })
     command = [
@@ -180,7 +185,7 @@ def main() -> None:
         "--rlhf_type", "gkd",
         "--model", args.model,
         "--teacher_model", str(teacher_model),
-        "--external_plugins", "Qwen/trace_video_template.py",
+        "--external_plugins", "Qwen/trace_video_template.py", "Qwen/opsd_pointwise_clip.py",
         "--adapters", args.adapter,
         "--dataset", str(train_dataset),
         "--output_dir", args.output,
@@ -196,7 +201,7 @@ def main() -> None:
         "--enable_thinking", "false",
         "--add_non_thinking_prefix", "true",
         "--lmbda", "1.0",
-        "--beta", "1.0",
+        "--beta", "0.0",
         "--temperature", "1.0",
         "--sft_alpha", "0",
         "--use_vllm", "false",
@@ -240,6 +245,8 @@ def main() -> None:
         "selected_ids_sha256": ids_sha256(selected_ids) if selected_ids is not None else None,
         "teacher_gate": str(gate_path.resolve()),
         "teacher_gate_sha256": file_sha256(gate_path),
+        "pointwise_clip": args.pointwise_clip,
+        "pointwise_clip_plugin_sha256": file_sha256(Path("Qwen/opsd_pointwise_clip.py")),
         "data_config": data_config,
         "sft_config": sft_config,
     }
