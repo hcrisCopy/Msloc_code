@@ -2,14 +2,41 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from swift.rewards import ORM, orms
 
 from common import parse_answer
-from Trace.trace.opd_grpo import boundary_score, temporal_iou
-from Trace.trace.text_explanation_reward import EntailmentExplanationJudge
+
+
+def _load_trace_reward_file(filename: str):
+    """只加载奖励实现，避免执行 Trace 包初始化及其旧模型依赖。"""
+    module_name = f"msloc_trace_reward_{Path(filename).stem}"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+    path = Path(__file__).resolve().parents[1] / "Trace" / "trace" / filename
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 Trace 奖励文件：{path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module  # dataclass 定义时需要能找到所属模块
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        del sys.modules[module_name]
+        raise
+    return module
+
+
+_temporal = _load_trace_reward_file("opd_grpo.py")
+_text = _load_trace_reward_file("text_explanation_reward.py")
+boundary_score = _temporal.boundary_score
+temporal_iou = _temporal.temporal_iou
+EntailmentExplanationJudge = _text.EntailmentExplanationJudge
 
 
 def _rows(completions, kwargs):
