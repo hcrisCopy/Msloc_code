@@ -420,6 +420,8 @@ python Qwen/check_teacher.py \
 
 准备 OPSD 数据时，保留第一阶段生成的全部训练 proposal。与原始伪造标注相交的片段标为 fake，目标是交集最长的一处，换算成片段内秒数；没有交集的片段标为 real，包括来自 fake 视频的误报。两类片段都参加 OPSD 训练。
 
+> 先用全部训练 proposal ：预检比较的是教师和学生各自从头生成的完整回答，而 OPSD 训练时教师沿学生已经生成的前缀提供逐 token 监督；教师某次完整回答出错，不等于它在该样本的学生前缀上也无法提供有效监督。因此暂不按预检结果逐条筛选。
+
 学生收到 40 帧片段、片段时长和 `Qwen/prompts/student.txt`。SFT 使用的 `student_sft.txt` 只要求输出异常解释和 `Interval: [start, end]`；这里的提示词还允许判断片段为 real：先用一或三句描述正常画面，第二行输出 `Real`。fake 片段仍先解释，再输出区间。
 
 教师看到与学生相同的片段和任务提示，另外得知片段真假。对于 fake 片段，教师还得到目标区间和解释线索：时空伪造类别、对象 `obj` 及其 `bnd_class`/`bnd_sub_class`、起止边界各自的 `bnd_class`。教师提示词说明这些线索应写入解释的哪一句，但不提供标注原句。
@@ -499,7 +501,7 @@ python Qwen/prepare_grpo.py \
   --clean
 ```
 
-从 OPSD LoRA 继续训练 LoRA。三项奖励沿用 Trace 的权重：定位 1.0、格式 0.1、解释 0.3。定位比较片段内单区间 IoU 和边界误差；真实片段回答 `Real` 得分。解释只对定位 IoU 至少 0.3 的异常回答评分，使用本地冻结 NLI 模型比较生成解释与标注事实。`--use_vllm false` 保证在线采样经过自定义视频时间戳模板。4 次采样组成一个 GRPO 组，关闭 thinking，与正式评测格式一致。单卡只改 `--devices` 为 `0`。权重、采样记录和奖励曲线写入 `../MSLoc_data/Qwen/grpo/`。
+默认从 OPSD LoRA 继续训练 LoRA。三项奖励沿用 Trace 的权重：定位 1.0、格式 0.1、解释 0.3。定位比较片段内单区间 IoU 和边界误差；真实片段回答 `Real` 得分。解释只对定位 IoU 至少 0.3 的异常回答评分，使用本地冻结 NLI 模型比较生成解释与标注事实。`--use_vllm false` 保证在线采样经过自定义视频时间戳模板。4 次采样组成一个 GRPO 组，关闭 thinking，与正式评测格式一致。单卡只改 `--devices` 为 `0`。权重、采样记录和奖励曲线写入 `../MSLoc_data/Qwen/grpo/`。
 
 ```bash
 python Qwen/train_grpo.py \
@@ -521,9 +523,31 @@ python Qwen/train_grpo.py \
   --clean
 ```
 
+如果要比较 **SFT → GRPO**，先照常运行上面的 `prepare_opsd.py` 和 `prepare_grpo.py`，但跳过教师预检与 `train_opsd.py`。GRPO 仍需要这些准备步骤提供真实、异常片段及奖励真值；学生只看到 `student.txt` 和视频。训练器会检查 SFT 与 GRPO 是否来自同一份训练 proposal 和标注。下面直接从 SFT LoRA 开始，产物单独写入 `../MSLoc_data/Qwen/grpo_from_sft/`：
+
+```bash
+python Qwen/train_grpo.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/sft/last \
+  --dataset ../MSLoc_data/Qwen/grpo_data/train.jsonl \
+  --nli-model ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small \
+  --output ../MSLoc_data/Qwen/grpo_from_sft \
+  --devices 0,1,2,3,4,5,6,7 \
+  --epochs 1 \
+  --max-steps -1 \
+  --global-batch-size 8 \
+  --num-generations 4 \
+  --learning-rate 1e-6 \
+  --max-length 8192 \
+  --max-completion-length 256 \
+  --save-steps 100 \
+  --resume none \
+  --clean
+```
+
 ### Qwen3.5-4B GRPO 评测
 
-使用同一学生提示词和测试 proposal，按 SFT、OPSD 相同的 Trace 定位指标评测 `last` adapter。结果写入 `../MSLoc_data/Qwen/grpo_eval/`。
+使用同一学生提示词和测试 proposal，按 SFT、OPSD 相同的 Trace 定位指标评测 `last` adapter。下面先评测从 OPSD 继续训练的权重，结果写入 `../MSLoc_data/Qwen/grpo_eval/`。
 
 ```bash
 python Qwen/evaluate.py \
@@ -534,6 +558,26 @@ python Qwen/evaluate.py \
   --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
   --prompt-file Qwen/prompts/student.txt \
   --output ../MSLoc_data/Qwen/grpo_eval \
+  --devices 0,1,2,3,4,5,6,7 \
+  --frames 40 \
+  --max-new-tokens 256 \
+  --max-proposals -1 \
+  --temperature 0 \
+  --resume none \
+  --clean
+```
+
+从 SFT 直接训练的 GRPO 权重使用相同设置评测，结果单独写入 `../MSLoc_data/Qwen/grpo_from_sft_eval/`：
+
+```bash
+python Qwen/evaluate.py \
+  --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/grpo_from_sft/last \
+  --proposals ../MSLoc_data/DeMamba/full/method/eval/predictions.json \
+  --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
+  --video-root ../MSLoc_data/data/Tasle-CoT-10K/videos \
+  --prompt-file Qwen/prompts/student.txt \
+  --output ../MSLoc_data/Qwen/grpo_from_sft_eval \
   --devices 0,1,2,3,4,5,6,7 \
   --frames 40 \
   --max-new-tokens 256 \
