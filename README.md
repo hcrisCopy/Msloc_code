@@ -520,7 +520,9 @@ python Qwen/prepare_grpo.py \
 - **格式**：能解析出规定的解释及 `Real` 或有效区间得 1 分；格式错误、区间越界等得 -1 分。
 - **解释**：只给目标为 fake、输出有效区间且定位 IoU 至少 0.3 的回答打分，其余为 0。评分依据是标注的一句或三句描述：一句时取对象异常的 `obj_caption`；三句时按开始、对象异常、结束，分别取两个 `bnd_caption` 和一个 `obj_caption`。生成解释按 `. ! ? ;` 以及 `whereas`、`however` 拆成短句。NLI 以标注描述为前提、生成短句为假设，分别估计“标注是否支持这句话”及“这句话是否与标注矛盾”。每条标注最多匹配一句，每句生成解释也最多匹配一条标注；对象异常的覆盖权重为 2，开始和结束各为 1。最终解释分数为 `标注覆盖率 − 0.50 × 已匹配句子的矛盾程度`。没匹配到标注的额外句子不直接扣分，因为标注未必列尽所有可见现象。
 
-视频采样使用 Transformers 路径（`--use_vllm false`），以保留自定义的 16/8/16 帧时间戳。单卡运行只改 `--devices` 为 `0`。权重和奖励曲线写入 `../MSLoc_data/Qwen/grpo/`；其中 `completions.jsonl` 逐条记录回答、三项得分和 `sample_id`，可据此在 `../MSLoc_data/Qwen/grpo_data/train.jsonl` 找到原 proposal。
+训练时用 Transformers 生成回答（`--use_vllm false`），使模型按实际时间戳读取 16/8/16 非均匀采样的 40 帧。单卡运行将 `--devices` 改为 `0`。
+
+训练权重和 `reward_curve.png` 保存在 `../MSLoc_data/Qwen/grpo/`。曲线显示总奖励、三项奖励各自的均值，以及同一组回答得分完全相同的比例。该目录下的 `completions.jsonl` 记录每条回答、三项得分和 `sample_id`；用 `sample_id` 可在 `../MSLoc_data/Qwen/grpo_data/train.jsonl` 找到对应的 proposal。
 
 ```bash
 python Qwen/train_grpo.py \

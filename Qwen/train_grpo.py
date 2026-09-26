@@ -213,11 +213,31 @@ def main() -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    figure, axis = plt.subplots(figsize=(8, 4))
-    axis.plot([row["step"] for row in history], [row["reward"] for row in history], label="Total reward")
-    axis.set(xlabel="Step", ylabel="Reward", title="Qwen3.5-4B GRPO")
-    axis.grid(alpha=0.25)
-    axis.legend()
+    steps = [row["step"] for row in history]
+    figure, axes = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
+    axes[0].plot(steps, [row["reward"] for row in history], color="tab:blue")
+    axes[0].set(ylabel="Total reward", title="Qwen3.5-4B GRPO")
+
+    # 三项曲线画原始均值，图例标明计算总奖励时各自的权重。
+    for name, weight, color in (
+        ("LocalizationReward", 1.0, "tab:orange"),
+        ("FormatReward", 0.1, "tab:green"),
+        ("ExplanationReward", 0.3, "tab:purple"),
+    ):
+        axes[1].plot(
+            steps,
+            [row[f"rewards/{name}/mean"] for row in history],
+            label=f"{name.removesuffix('Reward')} (weight {weight:g})",
+            color=color,
+        )
+    axes[1].set(ylabel="Component reward")
+    axes[1].legend(loc="best")
+
+    axes[2].plot(steps, [row["frac_reward_zero_std"] for row in history], color="tab:red")
+    axes[2].set(xlabel="Step", ylabel="Fraction", ylim=(-0.05, 1.05),
+                title="Groups with identical rewards")
+    for axis in axes:
+        axis.grid(alpha=0.25)
     figure.tight_layout()
     figure.savefig(output / "reward_curve.png", dpi=160)
     plt.close(figure)
