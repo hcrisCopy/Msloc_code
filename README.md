@@ -220,6 +220,8 @@ python evaluate_long.py \
 
 【可直接运行】Trace旧版本：大模型阶段以小模型阶段生成的proposal为基础，依次开展 SFT、OPD 与 GRPO 训练；运行说明请参阅 [运行指令](Trace/README_RUN_OPD_GRPO.md)。
 
+【调研文档】八卡运行时使用 Ray、vLLM 加速 OPSD 与 GRPO 的可行路线、工程示例和视频输入对齐风险，见 [OPSD 与 GRPO 八卡加速参考](Qwen/OPSD与GRPO八卡加速参考.md)。
+
 第二阶段代码统一放在 `Qwen/`；以下命令均在本仓库根目录执行。使用后训练版 `Qwen/Qwen3.5-4B`，SFT、OPD/OPSD 和 GRPO 共用独立环境。
 
 本阶段训练命令中的 `--max-steps -1` 表示按 `--epochs` 跑全量。单卡短跑可把 `--devices` 改为 `0`、`--max-steps` 改为 `10`、`--save-steps` 改为 `5`。OPSD 还可用 `--max-samples 256` 固定抽取 fake/real proposal；全量使用 `--max-samples -1`。短跑与全量使用不同输出目录，不能互相续训。
@@ -363,7 +365,7 @@ python Qwen/evaluate.py \
   --clean
 ```
 
-### Qwen3.5-4B OPSD：教师评测与训练
+### Qwen3.5-4B OPSD：教师评测，学生训练与评测
 
 OPSD 开始前，先用同一份 SFT LoRA 对训练 proposal 做两次完整生成：学生只看 40 帧片段和 `student.txt`；教师看相同片段、相同任务说明，还会通过训练时的 `teacher_opsd.txt` 得知该片段是 fake 还是 real。fake 片段另给教师片段内目标区间、异常对象和类别，指导其生成解释和定位；不提供标注原句。教师这次完整生成既用于和学生比较整体表现，也用于训练前逐条筛选。正式测试仍只评测不看真值的学生。以下全量命令分别输出到 `../MSLoc_data/Qwen/opsd_student_precheck/` 和 `../MSLoc_data/Qwen/opsd_teacher_precheck/`。
 
