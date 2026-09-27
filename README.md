@@ -255,11 +255,29 @@ CAUSAL_CONV1D_FORCE_BUILD=TRUE python -m pip install causal-conv1d==1.7.0 --no-b
 FLASH_ATTENTION_FORCE_BUILD=TRUE python -m pip install flash-attn==2.8.3 --cache-dir ../MSLoc_data/.cache/pip --no-build-isolation
 ```
 
+单机八卡服务器安装 Flash Attention 时，上面最后一条命令改用以下命令。先前的 `source Qwen/env.sh` 保留；这里把它设置的缓存和临时目录改到八卡服务器的 Ceph 路径：
+
+```bash
+mkdir -p /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/{flash_attn,pip,tmp}
+export FLASH_ATTENTION_CACHE_PATH=/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/flash_attn
+export TMPDIR=/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/tmp
+FLASH_ATTENTION_FORCE_BUILD=TRUE python -m pip install flash-attn==2.8.3 \
+  --cache-dir /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/pip \
+  --no-build-isolation
+```
+
 `Qwen/requirements.txt` 固定了训练、视频解码和其他加速依赖。`env.sh` 将 Flash Attention 的缓存和安装临时文件放在 `../MSLoc_data/.cache/`。新开终端时都要运行：
 
 ```bash
 conda activate msloc_qwen35
 source Qwen/env.sh
+```
+
+八卡服务器新开终端后，也要在 `source Qwen/env.sh` 之后重新执行上面的两条 `export`，因为 `env.sh` 会重设这两个路径。
+
+```bash
+export FLASH_ATTENTION_CACHE_PATH=/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/flash_attn
+export TMPDIR=/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/tmp
 ```
 
 ### 模型下载
