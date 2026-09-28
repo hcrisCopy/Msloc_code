@@ -240,22 +240,106 @@ python evaluate_long.py \
 
 ### 环境配置
 
-创建第二阶段环境 `msloc_qwen35`，并安装训练依赖：
+创建第二阶段环境 `msloc_qwen35`。每一步安装完成后运行紧随其后的检查；检查失败就先处理该步，不要继续安装。
 
 ```bash
 conda create -n msloc_qwen35 python=3.12 -y
 conda activate msloc_qwen35
+```
+
+> 检查 Conda 是否真正创建并激活了完整环境（仅看终端前缀不够）：
+>
+> ```bash
+> if test -f "$CONDA_PREFIX/conda-meta/history" && conda list -n msloc_qwen35 --json >/dev/null && python -c 'import sys, os; assert sys.prefix == os.environ["CONDA_PREFIX"] and sys.version_info[:2] == (3, 12)'; then echo 'OK: Conda 环境完整，Python 3.12 已激活'; else echo '失败：Conda 环境不完整或未正确激活' >&2; false; fi
+> ```
+
+安装 CUDA 工具包和 FFmpeg：
+
+```bash
 conda install -y -c nvidia/label/cuda-12.8.0 cuda-toolkit=12.8.0
+```
+
+> 检查 CUDA 编译器：
+>
+> ```bash
+> if "$CONDA_PREFIX/bin/nvcc" --version >/dev/null; then echo 'OK: CUDA 编译器可用'; else echo '失败：CUDA 编译器不可用' >&2; false; fi
+> ```
+
+```bash
 conda install -y -c conda-forge cuda-compat=12.8.1 ffmpeg=7
+```
+
+> 检查 CUDA 兼容库、Conda 中的 FFmpeg，以及 TorchCodec 所需的共享库：
+>
+> ```bash
+> if test -d "$CONDA_PREFIX/cuda-compat" && test -f "$CONDA_PREFIX/lib/libavutil.so.59" && "$CONDA_PREFIX/bin/ffmpeg" -version >/dev/null 2>&1; then echo 'OK: CUDA 兼容库与环境内 FFmpeg 7 可用'; else echo '失败：CUDA 兼容库或 FFmpeg 7 缺失' >&2; false; fi
+> ```
+
+配置缓存目录，并安装 PyTorch 与 Python 依赖：
+
+```bash
 source Qwen/env.sh
+```
+
+> 检查当前终端的环境设置：
+>
+> ```bash
+> if test -d "$FLASH_ATTENTION_CACHE_PATH" && test -d "$TMPDIR" && test "$FORCE_QWENVL_VIDEO_READER" = torchcodec; then echo 'OK: env.sh 已设置缓存和视频解码'; else echo '失败：env.sh 设置不完整' >&2; false; fi
+> ```
+
+```bash
 python -m pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+```
+
+> 检查 PyTorch 版本及 GPU 可用性：
+>
+> ```bash
+> python -c 'import torch; assert torch.__version__.startswith("2.10.0") and torch.version.cuda == "12.8" and torch.cuda.is_available(), "PyTorch 版本、CUDA 或 GPU 不可用"; print("OK: PyTorch", torch.__version__, "CUDA", torch.version.cuda, torch.cuda.get_device_name(0))'
+> ```
+
+```bash
 python -m pip install --upgrade pip setuptools wheel ninja packaging
+```
+
+> 检查构建工具：
+>
+> ```bash
+> python -c 'import pip, setuptools, wheel, ninja, packaging; print("OK: 构建工具可用")'
+> ```
+
+```bash
 python -m pip install --no-build-isolation -r Qwen/requirements.txt
+```
+
+> 检查训练依赖和视频解码是否能实际导入：
+>
+> ```bash
+> python -c 'import torch, swift, vllm; from torchcodec.decoders import VideoDecoder; print("OK: 训练依赖与 TorchCodec 可用")'
+> ```
+
+最后安装需要编译的扩展：
+
+```bash
 CAUSAL_CONV1D_FORCE_BUILD=TRUE python -m pip install causal-conv1d==1.7.0 --no-build-isolation
+```
+
+> 检查 causal-conv1d：
+>
+> ```bash
+> python -c 'import causal_conv1d; print("OK: causal-conv1d 可用")'
+> ```
+
+```bash
 FLASH_ATTENTION_FORCE_BUILD=TRUE python -m pip install flash-attn==2.8.3 --cache-dir ../MSLoc_data/.cache/pip --no-build-isolation
 ```
 
-单机八卡服务器安装 Flash Attention 时，上面最后一条命令改用以下命令。先前的 `source Qwen/env.sh` 保留；这里把它设置的缓存和临时目录改到八卡服务器的 Ceph 路径：
+> 检查 Flash Attention：
+>
+> ```bash
+> python -c 'import flash_attn; print("OK: Flash Attention 可用")'
+> ```
+
+单机八卡服务器安装 Flash Attention 时，上述 Flash Attention 安装命令改用以下命令。先前的 `source Qwen/env.sh` 保留；这里把它设置的缓存和临时目录改到八卡服务器的 Ceph 路径：
 
 ```bash
 mkdir -p /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/{flash_attn,pip,tmp}
