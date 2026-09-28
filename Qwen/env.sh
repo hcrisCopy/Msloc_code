@@ -3,7 +3,7 @@
 : "${CONDA_PREFIX:?请先执行 conda activate msloc_qwen35}"
 
 export CUDA_HOME="$CONDA_PREFIX"
-export LD_LIBRARY_PATH="$CONDA_PREFIX/cuda-compat:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/cuda-compat:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export FORCE_QWENVL_VIDEO_READER=torchcodec
 export LOG_LEVEL=INFO
 export TORCH_CUDA_ARCH_LIST=8.0
