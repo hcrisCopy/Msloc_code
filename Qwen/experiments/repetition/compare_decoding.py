@@ -171,7 +171,7 @@ def launch(args: argparse.Namespace) -> None:
     env = os.environ.copy()
     env.update({
         "CUDA_VISIBLE_DEVICES": ",".join(devices),
-        "FORCE_QWENVL_VIDEO_READER": "torchcodec",
+        "FORCE_QWENVL_VIDEO_READER": "decord",
         "FPS_MAX_FRAMES": "40",
         "VIDEO_MAX_TOKEN_NUM": "128",
         "TOKENIZERS_PARALLELISM": "false",

@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 
 import torch
+# 在加载 qwen-vl-utils 时指定官方支持的 Decord 后端，无需终端 export。
+os.environ["FORCE_QWENVL_VIDEO_READER"] = "decord"
 from qwen_vl_utils import fetch_video
+# SFT、OPSD、GRPO 和评测共用此入口，先修正依赖查询再导入 swift。
+import trl_compat  # noqa: F401
 from swift.template.register import TEMPLATE_MAPPING, register_template
 from swift.template.templates.qwen import Qwen3_5Template
 
@@ -36,8 +41,8 @@ class TraceVideoQwen3_5Template(Qwen3_5Template):
             return_video_metadata=True,
         )
         if (video.shape[0] != 40 or decoded_metadata["total_num_frames"] != 40
-                or decoded_metadata["video_backend"] != "torchcodec"):
-            raise ValueError(f"16/8/16 片段必须由 torchcodec 完整读取 40 帧：{clip}")
+                or decoded_metadata["video_backend"] != "decord"):
+            raise ValueError(f"16/8/16 片段必须由 decord 完整读取 40 帧：{clip}")
         metadata = {
             "fps": 1000.0,
             "frames_indices": milliseconds,

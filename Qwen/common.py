@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
-import subprocess
+from fractions import Fraction
 from pathlib import Path
 
 
@@ -142,6 +142,27 @@ def parse_answer(raw: str, duration: float) -> dict:
     }
 
 
+def write_clip_pixels(pixels, output: Path, fps: float) -> None:
+    """参考 PyAV 官方 NumPy 编码示例；保持原 MP4 的 H.264 编码设置。"""
+    import av
+
+    # 对齐原命令中帧率保留八位小数的设置，转换为编码器使用的有理数。
+    rate = Fraction(f"{fps:.8f}").limit_denominator(1_000_000)
+    with av.open(str(output), mode="w") as container:
+        stream = container.add_stream("libx264", rate=rate)
+        stream.width = pixels.shape[2]
+        stream.height = pixels.shape[1]
+        stream.pix_fmt = "yuv420p"
+        stream.options = {"preset": "veryfast", "crf": "23"}
+        for image in pixels:
+            frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        # 排空编码器缓冲，确保最后的帧也写入文件。
+        for packet in stream.encode():
+            container.mux(packet)
+
+
 def make_clip(video: Path, segment: tuple[float, float], output: Path, frames: int) -> None:
     """参考 Trace/trace/mm_utils.py 的 16/8/16 取帧，另存片段内真实时间戳。"""
     if frames != 40:
@@ -150,9 +171,9 @@ def make_clip(video: Path, segment: tuple[float, float], output: Path, frames: i
     if output.is_file() and timestamps_path.is_file():
         if output.stat().st_size == 0:
             raise RuntimeError(f"已有片段为空：{output}")
-        from torchcodec.decoders import VideoDecoder
+        from decord import VideoReader, cpu
 
-        if VideoDecoder(str(output)).metadata.num_frames != 40:
+        if len(VideoReader(str(output), ctx=cpu(0), fault_tol=1e-12)) != 40:
             raise ValueError(f"已有片段不是 40 帧：{output}")
         saved = json.loads(timestamps_path.read_text(encoding="utf-8"))
         if (saved["sampling"] != "trace16_8_16" or saved["proposal"] != list(segment)
@@ -162,11 +183,13 @@ def make_clip(video: Path, segment: tuple[float, float], output: Path, frames: i
     if not video.is_file():
         raise FileNotFoundError(video)
     import numpy as np
-    from torchcodec.decoders import VideoDecoder
+    from decord import VideoReader, cpu
 
-    decoder = VideoDecoder(str(video))
-    total = decoder.metadata.num_frames
-    fps = decoder.metadata.average_fps
+    # 与 Trace 一样通过 Decord 按帧索引读取；解码错误直接报错。
+    # Decord 的整数 0 会关闭阈值检查；极小正比例使第一个恢复帧即触发错误。
+    decoder = VideoReader(str(video), ctx=cpu(0), fault_tol=1e-12)
+    total = len(decoder)
+    fps = float(decoder.get_avg_fps())
     if total is None or total <= 0 or fps is None or not math.isfinite(fps) or fps <= 0:
         raise ValueError(f"视频帧数或帧率无效：{video}")
     start = max(0.0, segment[0])
@@ -194,24 +217,15 @@ def make_clip(video: Path, segment: tuple[float, float], output: Path, frames: i
     proposal_duration = segment[1] - segment[0]
     relative_milliseconds = [round(max(0.0, min(proposal_duration, index / fps - start)) * 1000)
                              for index in indices]
-    batch = decoder.get_frames_at(indices=indices).data
-    if batch.shape[0] != 40 or batch.shape[1] != 3:
+    batch = decoder.get_batch(indices).asnumpy()
+    if batch.ndim != 4 or batch.shape[0] != 40 or batch.shape[3] != 3:
         raise ValueError(f"解码帧形状错误：{video} {tuple(batch.shape)}")
-    height, width = batch.shape[2:]
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.stem + ".tmp.mp4")
-    command = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
-        "-r", f"{frames / proposal_duration:.8f}", "-i", "pipe:0", "-frames:v", str(frames),
-        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-pix_fmt", "yuv420p", str(temporary),
-    ]
-    pixels = batch.permute(0, 2, 3, 1).contiguous().numpy().tobytes()
-    subprocess.run(command, input=pixels, check=True)
+    write_clip_pixels(batch, temporary, frames / proposal_duration)
     if not temporary.is_file() or temporary.stat().st_size == 0:
         raise RuntimeError(f"截取片段失败：{video} {segment}")
-    if VideoDecoder(str(temporary)).metadata.num_frames != 40:
+    if len(VideoReader(str(temporary), ctx=cpu(0), fault_tol=1e-12)) != 40:
         raise RuntimeError(f"片段编码后不是 40 帧：{temporary}")
     timestamp_tmp = timestamps_path.with_name(timestamps_path.name + ".tmp")
     timestamp_tmp.write_text(json.dumps({

@@ -1,12 +1,17 @@
 # 第二阶段 Qwen3.5-4B：SFT、OPD/OPSD 与 GRPO 共用环境。
-# PyTorch/CUDA、causal-conv1d、flash-attn 按 README 的顺序分别安装。
+# GPU 版 PyTorch、causal-conv1d、flash-attn 按 README 的顺序分别安装。
+# 以下约束保留先安装的 cu128 构建，避免后续依赖解析升级 PyTorch。
+torch==2.10.0
+torchvision==0.25.0
+torchaudio==2.10.0
 ms-swift==4.5.3
 transformers==5.9.0
 trl==0.27.0
 peft==0.20.0
 vllm==0.19.1
-qwen-vl-utils==0.0.14
-torchcodec==0.10.0
+qwen-vl-utils[decord]==0.0.14
+decord==0.6.0
+av==16.1.0
 deepspeed==0.18.7
 liger-kernel==0.8.3
 flash-linear-attention==0.4.2

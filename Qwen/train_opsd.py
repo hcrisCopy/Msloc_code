@@ -188,7 +188,7 @@ def main() -> None:
         "CUDA_VISIBLE_DEVICES": ",".join(devices),
         "LOG_LEVEL": "INFO",
         "NPROC_PER_NODE": str(len(devices)),
-        "FORCE_QWENVL_VIDEO_READER": "torchcodec",
+        "FORCE_QWENVL_VIDEO_READER": "decord",
         "FPS_MAX_FRAMES": str(data_config["frames"]),
         "VIDEO_MAX_TOKEN_NUM": "128",
         "WANDB_DISABLED": "true",

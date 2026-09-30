@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-
-: "${CONDA_PREFIX:?请先执行 conda activate msloc_qwen35}"
-
-export CUDA_HOME="$CONDA_PREFIX"
-export LD_LIBRARY_PATH="$CONDA_PREFIX/cuda-compat:${LD_LIBRARY_PATH:-}"
-export FORCE_QWENVL_VIDEO_READER=torchcodec
-export LOG_LEVEL=INFO
-export TORCH_CUDA_ARCH_LIST=8.0
-export FLASH_ATTN_CUDA_ARCHS=80
-export MAX_JOBS=8
-
-mkdir -p ../MSLoc_data/.cache/flash_attn ../MSLoc_data/.cache/pip ../MSLoc_data/.cache/tmp
-export FLASH_ATTENTION_CACHE_PATH="$(realpath ../MSLoc_data/.cache/flash_attn)"
-export TMPDIR="$(realpath ../MSLoc_data/.cache/tmp)"
+# 保留旧调用方式；当前训练/评测入口已自行设置 Decord 和日志。
+# 环境配置不再需要 source 此文件，也不需要任何 export。
+:
