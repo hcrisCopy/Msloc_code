@@ -242,14 +242,13 @@ python evaluate_long.py \
 
 Linux + NVIDIA GPU，命令在Msloc_code/下执行；第二阶段使用独立环境。视频读写使用 Decord/PyAV，无需单独安装 FFmpeg。
 
-**1. 创建环境并安装依赖**
+**1. 创建环境并安装 PyTorch**
 
 ```bash
 conda create -n msloc_qwen35 python=3.12 -y
 conda activate msloc_qwen35
 python -m pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu128
 python -m pip install --upgrade pip setuptools wheel packaging ninja psutil
-python -m pip install --only-binary=av,decord --no-build-isolation -r Qwen/requirements.txt
 ```
 
 **2. 检查编译工具**
@@ -267,24 +266,34 @@ conda install -y -c nvidia/label/cuda-12.8.0 cuda-toolkit=12.8.0
 nvcc --version
 ```
 
-`g++` 不存在时先安装系统 C++ 编译器。CUDA 工具包版本看 `nvcc`，不看 `nvidia-smi`。
-
-**3. 安装 CUDA 扩展**
+确认 PyTorch 能找到工具包；输出路径必须有效，不能是 `None`：
 
 ```bash
+python -c 'from pathlib import Path; from torch.utils.cpp_extension import CUDA_HOME; print("CUDA_HOME:", CUDA_HOME); assert CUDA_HOME and (Path(CUDA_HOME) / "bin/nvcc").is_file(), "未找到 CUDA 编译工具包"'
+```
+
+**3. 安装项目依赖和 CUDA 扩展**
+
+```bash
+python -m pip install --only-binary=av,decord --no-build-isolation -r Qwen/requirements.txt
 python -m pip install causal-conv1d==1.7.0 --no-build-isolation
 python -m pip install flash-attn==2.8.3 --no-build-isolation
 ```
 
-先装 PyTorch 和编译工具，再装扩展；没有匹配的预编译包时会源码编译。命令依据对应版本的官方安装实现：[flash-attn](https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/setup.py)、[causal-conv1d](https://github.com/Dao-AILab/causal-conv1d/blob/v1.7.0/setup.py)。
+正常使用上面的 pip 命令，扩展会先尝试下载 GitHub 预编译包。若预编译包下载失败且安装退出，执行对应命令，直接源码编译：
+
+```bash
+CAUSAL_CONV1D_FORCE_BUILD=TRUE python -m pip install causal-conv1d==1.7.0 --no-build-isolation
+FLASH_ATTENTION_FORCE_BUILD=TRUE python -m pip install flash-attn==2.8.3 --no-build-isolation
+```
+
+命令依据对应版本的官方安装实现：[flash-attn](https://github.com/Dao-AILab/flash-attention/blob/v2.8.3/setup.py)、[causal-conv1d](https://github.com/Dao-AILab/causal-conv1d/blob/v1.7.0/setup.py)。
 
 使用 Ceph 缓存时，将上面的 Flash Attention 安装命令替换为：
 
 ```bash
-mkdir -p /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/{flash_attn,pip,tmp}
-TMPDIR=/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/tmp \
-FLASH_ATTENTION_CACHE_PATH=/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/flash_attn \
-python -m pip install flash-attn==2.8.3 \
+export FLASH_ATTENTION_CACHE_PATH=/mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/flash_attn
+pip install flash-attn==2.8.3 \
   --cache-dir /mnt/gemininjceph3/geminicephfs/mmsearch-luban-universal/group_2/user_sleepfeng/root/.cache/pip \
   --no-build-isolation
 ```
@@ -298,7 +307,7 @@ python Qwen/check_env.py
 
 检查依赖、GPU、两个 CUDA 扩展的前向/反向计算及视频读写；检查视频输出到 `../MSLoc_data/Qwen/env_check/`。通过后再按下文运行训练和评测。若出现 PTX/驱动版本错误，需要处理宿主机驱动，安装工具包不会升级驱动。
 
-新终端只需 `conda activate msloc_qwen35`，无需 `source Qwen/env.sh`。
+新终端只需 `conda activate msloc_qwen35`。
 
 ### 模型下载
 
