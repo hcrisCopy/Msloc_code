@@ -142,7 +142,7 @@ def parse_answer(raw: str, duration: float) -> dict:
     }
 
 
-def write_clip_pixels(pixels, output: Path, fps: float) -> None:
+def write_clip_pixels(pixels, output: Path, fps: float, video_threads: int = 0) -> None:
     """参考 PyAV 官方 NumPy 编码示例；保持原 MP4 的 H.264 编码设置。"""
     import av
 
@@ -150,6 +150,8 @@ def write_clip_pixels(pixels, output: Path, fps: float) -> None:
     rate = Fraction(f"{fps:.8f}").limit_denominator(1_000_000)
     with av.open(str(output), mode="w") as container:
         stream = container.add_stream("libx264", rate=rate)
+        if video_threads > 0:
+            stream.codec_context.thread_count = video_threads
         stream.width = pixels.shape[2]
         stream.height = pixels.shape[1]
         stream.pix_fmt = "yuv420p"
@@ -163,7 +165,8 @@ def write_clip_pixels(pixels, output: Path, fps: float) -> None:
             container.mux(packet)
 
 
-def make_clip(video: Path, segment: tuple[float, float], output: Path, frames: int) -> None:
+def make_clip(video: Path, segment: tuple[float, float], output: Path, frames: int,
+              video_threads: int = 0) -> None:
     """参考 Trace/trace/mm_utils.py 的 16/8/16 取帧，另存片段内真实时间戳。"""
     if frames != 40:
         raise ValueError("Qwen 输入固定为 40 帧")
@@ -173,7 +176,7 @@ def make_clip(video: Path, segment: tuple[float, float], output: Path, frames: i
             raise RuntimeError(f"已有片段为空：{output}")
         from decord import VideoReader, cpu
 
-        if len(VideoReader(str(output), ctx=cpu(0), fault_tol=1e-12)) != 40:
+        if len(VideoReader(str(output), ctx=cpu(0), num_threads=video_threads, fault_tol=1e-12)) != 40:
             raise ValueError(f"已有片段不是 40 帧：{output}")
         saved = json.loads(timestamps_path.read_text(encoding="utf-8"))
         if (saved["sampling"] != "trace16_8_16" or saved["proposal"] != list(segment)
@@ -187,7 +190,7 @@ def make_clip(video: Path, segment: tuple[float, float], output: Path, frames: i
 
     # 与 Trace 一样通过 Decord 按帧索引读取；解码错误直接报错。
     # Decord 的整数 0 会关闭阈值检查；极小正比例使第一个恢复帧即触发错误。
-    decoder = VideoReader(str(video), ctx=cpu(0), fault_tol=1e-12)
+    decoder = VideoReader(str(video), ctx=cpu(0), num_threads=video_threads, fault_tol=1e-12)
     total = len(decoder)
     fps = float(decoder.get_avg_fps())
     if total is None or total <= 0 or fps is None or not math.isfinite(fps) or fps <= 0:
@@ -222,10 +225,10 @@ def make_clip(video: Path, segment: tuple[float, float], output: Path, frames: i
         raise ValueError(f"解码帧形状错误：{video} {tuple(batch.shape)}")
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.stem + ".tmp.mp4")
-    write_clip_pixels(batch, temporary, frames / proposal_duration)
+    write_clip_pixels(batch, temporary, frames / proposal_duration, video_threads=video_threads)
     if not temporary.is_file() or temporary.stat().st_size == 0:
         raise RuntimeError(f"截取片段失败：{video} {segment}")
-    if len(VideoReader(str(temporary), ctx=cpu(0), fault_tol=1e-12)) != 40:
+    if len(VideoReader(str(temporary), ctx=cpu(0), num_threads=video_threads, fault_tol=1e-12)) != 40:
         raise RuntimeError(f"片段编码后不是 40 帧：{temporary}")
     timestamp_tmp = timestamps_path.with_name(timestamps_path.name + ".tmp")
     timestamp_tmp.write_text(json.dumps({

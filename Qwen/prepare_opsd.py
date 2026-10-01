@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from functools import partial
 from pathlib import Path
 
 from tqdm import tqdm
@@ -10,6 +11,59 @@ from tqdm import tqdm
 from common import clip_name, clip_timestamps_path, make_clip, proposal_segments, read_records
 from opsd_common import proposal_target, student_message, teacher_message
 from prepare_progress import PrepareProgress, sha256
+from prepare_parallel import ordered_video_results
+
+
+def prepare_video(row, *, args, annotations, student_prompt, teacher_opsd_prompt) -> dict:
+    """处理单个视频；任务只写自己的片段，不修改共享统计和进度。"""
+    name = row["video_path"]
+    relative_video = Path(name)
+    if relative_video.is_absolute() or ".." in relative_video.parts:
+        raise ValueError(f"video_path 必须是视频根目录下的相对路径：{name}")
+    output = Path(args.output_dir)
+    samples = []
+    audit_rows = []
+    video_counts = {"fake": 0, "real": 0, "multiple_gt": 0}
+    video_buckets = {name: 0 for name in ("positive", "hard_positive", "near_hard_negative", "real_false_positive")}
+    for index, proposal in enumerate(proposal_segments(row)):
+        target = proposal_target(proposal, annotations[name])
+        video_counts[target["kind"]] += 1
+        video_counts["multiple_gt"] += target["overlapping_gt_count"] > 1
+        video_buckets[target["replay_bucket"]] += 1
+        clip = output / "clips" / relative_video.with_suffix("") / clip_name(index, proposal)
+        make_clip(Path(args.video_root) / relative_video, proposal, clip, args.frames, video_threads=args.video_threads)
+        student = student_message(student_prompt, proposal[1] - proposal[0])
+        teacher = teacher_message(student, teacher_opsd_prompt, target, mode="opsd")
+        sample = {
+            "messages": [{"role": "user", "content": student}],
+            "videos": [str(clip)],
+            "chat_template_kwargs": {"nframes": 40},
+            "teacher_prompt": teacher,
+        }
+        audit_row = {
+            "id": f"{name}::{index}",
+            "proposal": list(proposal),
+            "target_kind": target["kind"],
+            "target_relative": target["relative_segment"],
+            "overlapping_gt_count": target["overlapping_gt_count"],
+            "source_video_type": target["source_video_type"],
+            "replay_bucket": target["replay_bucket"],
+            "max_gt_iou": target["max_gt_iou"],
+            "nearest_gt_gap_seconds": target["nearest_gt_gap_seconds"],
+            "object_name": target.get("object_name"),
+            "object_class": target.get("object_class"),
+            "manipulation_type": target.get("manipulation_type"),
+            "object_subclass": target.get("object_subclass"),
+            "start_class": target.get("start_class"),
+            "end_class": target.get("end_class"),
+            "explanation_sentence_count": target.get("explanation_sentence_count"),
+            "clip": str(clip),
+            "timestamps": str(clip_timestamps_path(clip)),
+        }
+        samples.append(sample)
+        audit_rows.append(audit_row)
+    return {"video_path": name, "samples": samples, "targets": audit_rows,
+            "counts": video_counts, "buckets": video_buckets}
 
 
 def main() -> None:
@@ -21,9 +75,13 @@ def main() -> None:
     parser.add_argument("--teacher-opsd-prompt-file", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--frames", type=int, required=True)
+    parser.add_argument("--workers", type=int, default=1, help="同时处理的视频数，默认串行")
+    parser.add_argument("--video-threads", type=int, default=1, help="每个任务的解码/编码线程数")
     parser.add_argument("--resume", choices=["none", "auto"], required=True)
     parser.add_argument("--clean", action="store_true")
     args = parser.parse_args()
+    if args.workers < 1 or args.video_threads < 1:
+        raise ValueError("--workers 和 --video-threads 必须大于等于 1")
     if args.frames != 40:
         raise ValueError("Qwen 输入固定为 40 帧")
     output = Path(args.output_dir)
@@ -60,58 +118,17 @@ def main() -> None:
             counts[key] += record["counts"][key]
         for key in buckets:
             buckets[key] += record["buckets"][key]
-    for row in tqdm(proposals[len(progress.completed):], desc="OPSD proposals", unit="video",
-                    initial=len(progress.completed), total=len(proposals)):
-        name = row["video_path"]
-        relative_video = Path(name)
-        if relative_video.is_absolute() or ".." in relative_video.parts:
-            raise ValueError(f"video_path 必须是视频根目录下的相对路径：{name}")
-        samples = []
-        audit_rows = []
-        video_counts = {key: 0 for key in counts}
-        video_buckets = {key: 0 for key in buckets}
-        for index, proposal in enumerate(proposal_segments(row)):
-            target = proposal_target(proposal, annotations[name])
-            counts[target["kind"]] += 1
-            video_counts[target["kind"]] += 1
-            counts["multiple_gt"] += target["overlapping_gt_count"] > 1
-            video_counts["multiple_gt"] += target["overlapping_gt_count"] > 1
-            buckets[target["replay_bucket"]] += 1
-            video_buckets[target["replay_bucket"]] += 1
-            clip = output / "clips" / relative_video.with_suffix("") / clip_name(index, proposal)
-            make_clip(Path(args.video_root) / relative_video, proposal, clip, args.frames)
-            student = student_message(student_prompt, proposal[1] - proposal[0])
-            teacher = teacher_message(student, teacher_opsd_prompt, target, mode="opsd")
-            sample = {
-                "messages": [{"role": "user", "content": student}],
-                "videos": [str(clip)],
-                "chat_template_kwargs": {"nframes": 40},
-                "teacher_prompt": teacher,
-            }
-            audit_row = {
-                "id": f"{name}::{index}",
-                "proposal": list(proposal),
-                "target_kind": target["kind"],
-                "target_relative": target["relative_segment"],
-                "overlapping_gt_count": target["overlapping_gt_count"],
-                "source_video_type": target["source_video_type"],
-                "replay_bucket": target["replay_bucket"],
-                "max_gt_iou": target["max_gt_iou"],
-                "nearest_gt_gap_seconds": target["nearest_gt_gap_seconds"],
-                "object_name": target.get("object_name"),
-                "object_class": target.get("object_class"),
-                "manipulation_type": target.get("manipulation_type"),
-                "object_subclass": target.get("object_subclass"),
-                "start_class": target.get("start_class"),
-                "end_class": target.get("end_class"),
-                "explanation_sentence_count": target.get("explanation_sentence_count"),
-                "clip": str(clip),
-                "timestamps": str(clip_timestamps_path(clip)),
-            }
-            samples.append(sample)
-            audit_rows.append(audit_row)
-        progress.append({"video_path": name, "samples": samples, "targets": audit_rows,
-                         "counts": video_counts, "buckets": video_buckets})
+    process_video = partial(prepare_video, args=args, annotations=annotations,
+                           student_prompt=student_prompt, teacher_opsd_prompt=teacher_opsd_prompt)
+    records = ordered_video_results(process_video, proposals[len(progress.completed):], args.workers)
+    print(f"CPU preparation: workers={args.workers} video_threads={args.video_threads}", flush=True)
+    for record in tqdm(records, desc="OPSD proposals", unit="video",
+                       initial=len(progress.completed), total=len(proposals)):
+        progress.append(record)
+        for key in counts:
+            counts[key] += record["counts"][key]
+        for key in buckets:
+            buckets[key] += record["buckets"][key]
     if counts["fake"] == 0 or counts["real"] == 0:
         raise ValueError(f"OPSD 训练数据必须包含异常和正常 proposal：{counts}")
     config = {

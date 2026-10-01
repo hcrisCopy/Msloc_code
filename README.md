@@ -364,9 +364,13 @@ python Qwen/prepare_sft.py \
   --prompt-file Qwen/prompts/student_sft.txt \
   --output-dir ../MSLoc_data/Qwen/sft_data \
   --frames 40 \
+  --workers 4 \
+  --video-threads 1 \
   --resume none \
   --clean
 ```
+
+`--workers 4` 同时处理 4 个视频，`--video-threads 1` 限制每个视频的编解码线程数；串行处理设 `--workers 1`。续建时改为 `--resume auto` 并去掉 `--clean`，可以调整并发数。
 
 这一步打印信息：`SFT samples` 是与原始标注区间相交、写入训练集的 proposal 数；`negative_excluded` 是没有交集、未用于 SFT 的 proposal 数；`multiple_gt` 是与多个原始标注区间相交的 proposal 数，已包含在 `SFT samples` 中，每条只取交集最长的一处。`train.jsonl` 是训练数据；`targets.jsonl` 同时记录所选的 proposal 内的标注区间和片段内目标区间；`clips/` 存放 40 帧片段。
 
@@ -484,9 +488,13 @@ python Qwen/prepare_opsd.py \
   --teacher-opsd-prompt-file Qwen/prompts/teacher_opsd.txt \
   --output-dir ../MSLoc_data/Qwen/opsd_data \
   --frames 40 \
+  --workers 4 \
+  --video-threads 1 \
   --resume none \
   --clean
 ```
+
+并发参数与 SFT 相同：同时处理 4 个视频，每个视频使用 1 个编解码线程。
 
 先将通过预检的 SFT LoRA 合并成独立模型，作为固定教师，保存在 `../MSLoc_data/Qwen/sft_teacher/`；重复执行会复用完整产物。教师和学生从同一份 SFT 权重起步；训练中只更新学生 LoRA，教师始终保持初始权重。同一版提示词生成的数据和评测结果可以复用。
 
@@ -558,9 +566,12 @@ python Qwen/prepare_grpo.py \
   --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
   --prompt-file Qwen/prompts/student.txt \
   --output-dir ../MSLoc_data/Qwen/grpo_data \
+  --workers 4 \
   --resume none \
   --clean
 ```
+
+`--workers 4` 并发检查 4 条 proposal 的片段和时间戳文件；GRPO 复用已有视频，无需 `--video-threads`。设为 `1` 则串行，续建使用 `--resume auto` 并去掉 `--clean`。
 
 训练默认从 OPSD LoRA 继续。学生只看 40 帧视频、片段时长和 `student.txt`，对同一个 proposal 生成 4 个回答；真假标签、片段内目标区间和标注解释只用于打分，不进入学生提示词。关闭 thinking，回答先写解释，再写 `Real` 或 `Interval: [start, end]`。
 

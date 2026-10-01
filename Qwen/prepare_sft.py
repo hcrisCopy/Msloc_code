@@ -3,12 +3,69 @@
 from __future__ import annotations
 
 import argparse
+from functools import partial
 from pathlib import Path
 
 from tqdm import tqdm
 
 from common import clip_name, clip_timestamps_path, explanation, gt_segments, make_clip, number, overlap, proposal_segments, read_records, target_text
 from prepare_progress import PrepareProgress, sha256
+from prepare_parallel import ordered_video_results
+
+
+def prepare_video(row, *, args, gt, prompt) -> dict:
+    """处理单个视频；任务只写自己的片段，不修改共享统计和进度。"""
+    video_name = row["video_path"]
+    relative_video = Path(video_name)
+    if relative_video.is_absolute() or ".." in relative_video.parts:
+        raise ValueError(f"video_path 必须是视频根目录下的相对路径：{video_name}")
+    source = Path(args.video_root) / relative_video
+    output_dir = Path(args.output_dir)
+    targets = gt_segments(gt[video_name])
+    samples = []
+    audit_rows = []
+    video_counts = {"positive": 0, "negative": 0, "multiple": 0}
+    for index, proposal in enumerate(proposal_segments(row)):
+        hits = [(overlap(proposal, (start, end)), start, end, ann) for start, end, ann in targets]
+        hits = [hit for hit in hits if hit[0] > 0]
+        if not hits:
+            video_counts["negative"] += 1
+            continue
+        if len(hits) > 1:
+            video_counts["multiple"] += 1
+        _, start, end, ann = max(hits, key=lambda hit: hit[0])
+        clipped = (max(start, proposal[0]), min(end, proposal[1]))
+        relative = (clipped[0] - proposal[0], clipped[1] - proposal[0])
+        clip = output_dir / "clips" / relative_video.with_suffix("") / clip_name(index, proposal)
+        make_clip(source, proposal, clip, args.frames, video_threads=args.video_threads)
+        caption = explanation(ann)
+        if clipped != (start, end) and len(caption) == 3:
+            caption = [caption[1]]
+        user = f"{prompt}\n\nClip duration: {number(proposal[1] - proposal[0])} seconds."
+        sample = {
+            "messages": [
+                {"role": "user", "content": f"<video>{user}"},
+                {"role": "assistant", "content": target_text(caption, relative)},
+            ],
+            "videos": [str(clip)],
+            "chat_template_kwargs": {"nframes": 40},
+        }
+        audit = {
+            "video_path": video_name,
+            "proposal_index": index,
+            "proposal": list(proposal),
+            "target_absolute": list(clipped),
+            "target_relative": list(relative),
+            "clip": str(clip),
+            "timestamps": str(clip_timestamps_path(clip)),
+            "explanation": caption,
+            "overlapping_gt_count": len(hits),
+        }
+        samples.append(sample)
+        audit_rows.append(audit)
+        video_counts["positive"] += 1
+    return {"video_path": video_name, "samples": samples,
+            "targets": audit_rows, "counts": video_counts}
 
 
 def main() -> None:
@@ -19,9 +76,13 @@ def main() -> None:
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--frames", type=int, required=True)
+    parser.add_argument("--workers", type=int, default=1, help="同时处理的视频数，默认串行")
+    parser.add_argument("--video-threads", type=int, default=1, help="每个任务的解码/编码线程数")
     parser.add_argument("--resume", choices=["none", "auto"], required=True)
     parser.add_argument("--clean", action="store_true")
     args = parser.parse_args()
+    if args.workers < 1 or args.video_threads < 1:
+        raise ValueError("--workers 和 --video-threads 必须大于等于 1")
     if args.frames != 40:
         raise ValueError("Qwen 输入固定为 40 帧")
     output_dir = Path(args.output_dir)
@@ -56,61 +117,15 @@ def main() -> None:
         positive += record["counts"]["positive"]
         negative += record["counts"]["negative"]
         multiple += record["counts"]["multiple"]
-    for row in tqdm(proposals[len(progress.completed):], desc="SFT proposals", unit="video",
-                    initial=len(progress.completed), total=len(proposals)):
-        video_name = row["video_path"]
-        relative_video = Path(video_name)
-        if relative_video.is_absolute() or ".." in relative_video.parts:
-            raise ValueError(f"video_path 必须是视频根目录下的相对路径：{video_name}")
-        source = Path(args.video_root) / relative_video
-        targets = gt_segments(gt[video_name])
-        samples = []
-        audit_rows = []
-        video_counts = {"positive": 0, "negative": 0, "multiple": 0}
-        for index, proposal in enumerate(proposal_segments(row)):
-            hits = [(overlap(proposal, (start, end)), start, end, ann) for start, end, ann in targets]
-            hits = [hit for hit in hits if hit[0] > 0]
-            if not hits:
-                negative += 1
-                video_counts["negative"] += 1
-                continue
-            if len(hits) > 1:
-                multiple += 1
-                video_counts["multiple"] += 1
-            _, start, end, ann = max(hits, key=lambda hit: hit[0])
-            clipped = (max(start, proposal[0]), min(end, proposal[1]))
-            relative = (clipped[0] - proposal[0], clipped[1] - proposal[0])
-            clip = output_dir / "clips" / relative_video.with_suffix("") / clip_name(index, proposal)
-            make_clip(source, proposal, clip, args.frames)
-            caption = explanation(ann)
-            if clipped != (start, end) and len(caption) == 3:
-                caption = [caption[1]]
-            user = f"{prompt}\n\nClip duration: {number(proposal[1] - proposal[0])} seconds."
-            sample = {
-                "messages": [
-                    {"role": "user", "content": f"<video>{user}"},
-                    {"role": "assistant", "content": target_text(caption, relative)},
-                ],
-                "videos": [str(clip)],
-                "chat_template_kwargs": {"nframes": 40},
-            }
-            audit = {
-                "video_path": video_name,
-                "proposal_index": index,
-                "proposal": list(proposal),
-                "target_absolute": list(clipped),
-                "target_relative": list(relative),
-                "clip": str(clip),
-                "timestamps": str(clip_timestamps_path(clip)),
-                "explanation": caption,
-                "overlapping_gt_count": len(hits),
-            }
-            samples.append(sample)
-            audit_rows.append(audit)
-            positive += 1
-            video_counts["positive"] += 1
-        progress.append({"video_path": video_name, "samples": samples,
-                         "targets": audit_rows, "counts": video_counts})
+    process_video = partial(prepare_video, args=args, gt=gt, prompt=prompt)
+    records = ordered_video_results(process_video, proposals[len(progress.completed):], args.workers)
+    print(f"CPU preparation: workers={args.workers} video_threads={args.video_threads}", flush=True)
+    for record in tqdm(records, desc="SFT proposals", unit="video",
+                       initial=len(progress.completed), total=len(proposals)):
+        progress.append(record)
+        positive += record["counts"]["positive"]
+        negative += record["counts"]["negative"]
+        multiple += record["counts"]["multiple"]
     if positive == 0:
         raise ValueError("没有与 GT 相交的训练 proposal")
     progress.finish({"counts": {"positive": positive, "negative": negative, "multiple": multiple}})

@@ -6,12 +6,15 @@ import argparse
 import hashlib
 import json
 import shutil
+from functools import partial
+from itertools import zip_longest
 from pathlib import Path
 
 from tqdm import tqdm
 
 from common import first_cot_entry, gt_segments, overlap, read_records
 from opsd_common import student_message
+from prepare_parallel import ordered_video_results
 
 
 def sha256(path: Path) -> str:
@@ -54,6 +57,44 @@ def evidence_for(proposal: list[float], annotation: dict, target: dict) -> dict:
     return evidence
 
 
+def prepare_proposal(lines, *, annotations: dict, prompt: str) -> dict:
+    """检查已有片段并构造奖励字段；不重新生成视频。"""
+    sample_line, target_line = lines
+    sample, target = json.loads(sample_line), json.loads(target_line)
+    video_name, _, proposal_index = target["id"].rpartition("::")
+    if not video_name or not proposal_index.isdigit() or video_name not in annotations:
+        raise ValueError(f"无效的 proposal ID：{target['id']}")
+    if len(sample["videos"]) != 1:
+        raise ValueError(f"OPSD 每条数据必须恰有一个片段：{target['id']}")
+    clip = Path(sample["videos"][0])
+    if sample["videos"] != [target["clip"]] or not clip.is_file() or not Path(target["timestamps"]).is_file():
+        raise ValueError(f"OPSD 片段或时间戳缺失：{target['id']}")
+    sidecar = json.loads(Path(target["timestamps"]).read_text(encoding="utf-8"))
+    if sidecar["sampling"] != "trace16_8_16" or sidecar["proposal"] != target["proposal"]:
+        raise ValueError(f"片段时间戳与目标 proposal 不一致：{target['id']}")
+    if sample["chat_template_kwargs"] != {"nframes": 40} or len(sample["messages"]) != 1:
+        raise ValueError(f"OPSD 视频输入格式不符：{target['id']}")
+    duration = target["proposal"][1] - target["proposal"][0]
+    if sample["messages"][0] != {"role": "user", "content": student_message(prompt, duration)}:
+        raise ValueError(f"OPSD 学生提示词或时长不符：{target['id']}")
+    if target["target_kind"] not in ("fake", "real"):
+        raise ValueError(f"未知片段类别：{target['id']}")
+    if target["target_kind"] == "real" and target["target_relative"] is not None:
+        raise ValueError(f"真实片段不能有 GT 区间：{target['id']}")
+    evidence = evidence_for(target["proposal"], annotations[video_name], target)
+    row = {
+        "sample_id": target["id"],
+        "messages": sample["messages"],
+        "videos": sample["videos"],
+        "chat_template_kwargs": sample["chat_template_kwargs"],
+        "target_kind": target["target_kind"],
+        "target_relative": target["target_relative"],
+        "clip_duration": duration,
+        "evidence": evidence,
+    }
+    return row
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--opsd-dataset", required=True)
@@ -63,7 +104,10 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--resume", choices=["none", "auto"], required=True)
     parser.add_argument("--clean", action="store_true")
+    parser.add_argument("--workers", type=int, default=1, help="同时检查的 proposal 数，默认串行")
     args = parser.parse_args()
+    if args.workers < 1:
+        raise ValueError("--workers 必须大于等于 1")
     output = Path(args.output_dir)
     data_root = Path("../MSLoc_data/Qwen").resolve()
     if output.resolve() == data_root or not output.resolve().is_relative_to(data_root):
@@ -122,50 +166,27 @@ def main() -> None:
     with Path(args.opsd_dataset).open(encoding="utf-8") as samples, \
          Path(args.opsd_targets).open(encoding="utf-8") as targets, \
          dataset_tmp.open("a" if args.resume == "auto" else "w", encoding="utf-8") as writer:
-        from itertools import zip_longest
-        for index, (sample_line, target_line) in enumerate(tqdm(zip_longest(samples, targets), desc="GRPO proposals", unit="clip")):
-            total = index + 1
-            if sample_line is None or target_line is None:
-                raise ValueError("OPSD 训练数据与目标审计行数不一致")
-            if index < completed:
-                if existing_ids[index] != json.loads(target_line)["id"]:
-                    raise ValueError(f"GRPO 续建前缀与 OPSD proposal 错位：第 {index} 行")
-                continue
-            sample, target = json.loads(sample_line), json.loads(target_line)
-            video_name, _, proposal_index = target["id"].rpartition("::")
-            if not video_name or not proposal_index.isdigit() or video_name not in annotations:
-                raise ValueError(f"无效的 proposal ID：{target['id']}")
-            if len(sample["videos"]) != 1:
-                raise ValueError(f"OPSD 每条数据必须恰有一个片段：{target['id']}")
-            clip = Path(sample["videos"][0])
-            if sample["videos"] != [target["clip"]] or not clip.is_file() or not Path(target["timestamps"]).is_file():
-                raise ValueError(f"OPSD 片段或时间戳缺失：{target['id']}")
-            sidecar = json.loads(Path(target["timestamps"]).read_text(encoding="utf-8"))
-            if sidecar["sampling"] != "trace16_8_16" or sidecar["proposal"] != target["proposal"]:
-                raise ValueError(f"片段时间戳与目标 proposal 不一致：{target['id']}")
-            if sample["chat_template_kwargs"] != {"nframes": 40} or len(sample["messages"]) != 1:
-                raise ValueError(f"OPSD 视频输入格式不符：{target['id']}")
-            duration = target["proposal"][1] - target["proposal"][0]
-            if sample["messages"][0] != {"role": "user", "content": student_message(prompt, duration)}:
-                raise ValueError(f"OPSD 学生提示词或时长不符：{target['id']}")
-            if target["target_kind"] not in count:
-                raise ValueError(f"未知片段类别：{target['id']}")
-            if target["target_kind"] == "real" and target["target_relative"] is not None:
-                raise ValueError(f"真实片段不能有 GT 区间：{target['id']}")
-            evidence = evidence_for(target["proposal"], annotations[video_name], target)
-            row = {
-                "sample_id": target["id"],
-                "messages": sample["messages"],
-                "videos": sample["videos"],
-                "chat_template_kwargs": sample["chat_template_kwargs"],
-                "target_kind": target["target_kind"],
-                "target_relative": target["target_relative"],
-                "clip_duration": duration,
-                "evidence": evidence,
-            }
+        def pending_proposals():
+            # 文件只在主线程读取；续建前缀仍逐行核对。
+            nonlocal total
+            for index, (sample_line, target_line) in enumerate(zip_longest(samples, targets)):
+                total = index + 1
+                if sample_line is None or target_line is None:
+                    raise ValueError("OPSD 训练数据与目标审计行数不一致")
+                if index < completed:
+                    if existing_ids[index] != json.loads(target_line)["id"]:
+                        raise ValueError(f"GRPO 续建前缀与 OPSD proposal 错位：第 {index} 行")
+                    continue
+                yield sample_line, target_line
+
+        process = partial(prepare_proposal, annotations=annotations, prompt=prompt)
+        records = ordered_video_results(process, pending_proposals(), args.workers)
+        print(f"CPU 数据准备：workers={args.workers}", flush=True)
+        for row in tqdm(records, initial=completed, desc="GRPO proposals", unit="clip"):
+            # 按输入顺序写入；只有主线程更新文件和统计，保留续建前缀。
             writer.write(json.dumps(row, ensure_ascii=False) + "\n")
             writer.flush()
-            count[target["target_kind"]] += 1
+            count[row["target_kind"]] += 1
         if completed > total:
             raise ValueError("GRPO 续建行数超过原始 OPSD 数据")
     if not all(count.values()):
