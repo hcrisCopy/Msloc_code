@@ -1,0 +1,2 @@
+# Required by actual multi-role ray_launch.py; not needed by the original train.py.
+ray[default]==2.59.0

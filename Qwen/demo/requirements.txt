@@ -1,0 +1,2 @@
+# Install the same pinned training stack as the existing project.
+-r ../requirements.txt
