@@ -17,7 +17,8 @@ def main():
     parser.add_argument("--opsd-dataset", required=True)
     parser.add_argument("--opsd-targets", required=True)
     parser.add_argument("--annotation", required=True)
-    parser.add_argument("--samples", type=int, default=64)
+    parser.add_argument("--samples", type=int, default=256,
+                        help="Total proposal clips across fake and real, shared by all demo stages (default: 256).")
     parser.add_argument("--path-map", action="append", default=[], metavar="OLD=NEW",
                         help="Explicit clip path prefix replacement; repeat for multiple roots.")
     parser.add_argument("--output", required=True)
@@ -25,8 +26,8 @@ def main():
     parser.add_argument("--clean", action="store_true")
     args = parser.parse_args()
     require_root()
-    if args.samples < 2:
-        raise ValueError("--samples must be >=2 and include both fake and real.")
+    if args.samples < 1:
+        raise ValueError("--samples must be positive.")
     mappings = []
     for entry in args.path_map:
         old, sep, new = entry.partition("=")
@@ -52,20 +53,26 @@ def main():
         raise ValueError("OPSD samples/targets are not a one-to-one sequence.")
     annotations = {r["video_path"]: r for r in read_records(args.annotation)}
     groups = {kind: [i for i, r in enumerate(targets) if r["target_kind"] == kind] for kind in ("fake", "real")}
-    if not all(groups.values()) or args.samples > len(samples):
-        raise ValueError("Need enough source samples and both fake/real classes.")
+    source_counts = {kind: len(indices) for kind, indices in groups.items()}
+    if sum(source_counts.values()) != len(targets):
+        raise ValueError("Every source target_kind must be fake or real.")
+    if args.samples > len(samples):
+        raise ValueError("--samples exceeds the number of source proposals.")
+    # Preserve source proposal proportions using integer largest-remainder quotas.
+    # Equal remainders use the stable fake/real order; no minority oversampling.
+    quotas = {kind: args.samples * count // len(samples) for kind, count in source_counts.items()}
+    remainders = {kind: args.samples * count % len(samples) for kind, count in source_counts.items()}
+    remaining = args.samples - sum(quotas.values())
+    for kind in sorted(groups, key=lambda kind: remainders[kind], reverse=True)[:remaining]:
+        quotas[kind] += 1
     rng = random.Random(42)
-    for indices in groups.values():
-        rng.shuffle(indices)
-    chosen = []
-    while len(chosen) < args.samples:
-        for kind in ("fake", "real"):
-            if groups[kind] and len(chosen) < args.samples:
-                chosen.append(groups[kind].pop())
-    chosen.sort()
+    chosen = sorted(index for kind, indices in groups.items() for index in rng.sample(indices, quotas[kind]))
+    print(f"Source proposals: {source_counts}; proportional subset: {quotas}; seed=42")
     config = {"source": {name: sha256(getattr(args, name)) for name in
                          ("opsd_dataset", "opsd_targets", "annotation")},
               "samples": args.samples, "path_map": args.path_map, "seed": 42,
+              "sampling": "source_proportional_largest_remainder",
+              "source_counts": source_counts, "sample_counts": quotas,
               "prepare_sources": {name: sha256(name) for name in
                   ("Qwen/demo/prepare.py", "Qwen/demo/demo_utils.py", "Qwen/common.py",
                    "Qwen/opsd_common.py", "Qwen/prepare_grpo.py", "Qwen/prompts/student_sft.txt")}}

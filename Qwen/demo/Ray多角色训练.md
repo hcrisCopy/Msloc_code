@@ -8,6 +8,8 @@
 
 本入口实际启动常驻的生成、教师／参考、训练及奖励 Actor，执行 OPSD 或 GRPO。它不再通过单个 Actor 启动 `train.py`。代码只在 `Qwen/demo/`，复用原项目视频模板、数据规则、奖励函数，以及固定版本 ms-swift 的模型接口和损失函数。
 
+输入权重与主 README 一致：OPSD 继续训练 SFT LoRA，教师使用原 merge 产物；GRPO 继续训练 OPSD LoRA。Ray 重新组织了训练循环，并非直接调用正式训练脚本；数值一致性尚待 GPU 实测。
+
 **当前交付状态：代码与静态接口核对已完成，尚未在目标 GPU 服务器运行。** 下列测试、权重回载和加速实验须在服务器执行，不能把代码存在当作训练通过或已经提速的证据。所有命令从 `Msloc_code/` 执行，输出放在 `../MSLoc_data/Qwen/demo/`。
 
 <a id="single-gpu"></a>
@@ -22,13 +24,14 @@
 
 **前提是三个 GPU 模型进程同时装得下。** Trainer、Rollout、Scorer 共用 GPU 0，显存不会因 Ray 分配 0.34/0.33/0.33 GPU 资源而被隔离或压缩。OPSD 需要 6 个逻辑 CPU、GRPO 需要 8 个（每角色 2 个）；对象存储仍要求 `/dev/shm` 至少有 8 GiB 可用空间。单卡能否运行取决于可用显存与具体配置。
 
-先按[主 README](README.md#setup)准备环境、完整权重与数据；完整安装命令已包含 Ray，OPSD 还需[教师准入](README.md#preflight)。以下命令以 HF 生成后端验证同步流程，不要求 vLLM alignment。全局 batch=8、32 步等方法参数与八卡示例一致。
+先按[主 README](README.md#setup)准备环境、正式实验权重与数据；完整安装命令已包含 Ray，OPSD 还需[merge 与教师准入](README.md#preflight)。以下命令以 HF 生成后端验证同步流程，不要求 vLLM alignment。全局 batch=8、32 步等方法参数与八卡示例一致。
 
 ```bash
+# OPSD：原始底座 + SFT LoRA；教师为同一 SFT LoRA 的 merge 产物
 python Qwen/demo/ray_launch.py \
   --stage opsd --backend transformers --schedule parallel \
-  --model ../MSLoc_data/Qwen/received/sft_full --adapter none \
-  --teacher-model ../MSLoc_data/Qwen/received/teacher_full --teacher-adapter none \
+  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/sft/last \
+  --teacher-model ../MSLoc_data/Qwen/sft_teacher --teacher-adapter none \
   --teacher-gate ../MSLoc_data/Qwen/demo/gate.json \
   --data ../MSLoc_data/Qwen/demo/data --devices 0 \
   --cpus-per-worker 2 --object-store-gb 8 --sync-chunk-mb 256 --sync-atol 0.1 \
@@ -37,9 +40,10 @@ python Qwen/demo/ray_launch.py \
   --max-length 8192 --max-new-tokens 256 \
   --output ../MSLoc_data/Qwen/demo/opsd_ray_single --resume none
 
+# GRPO：原始底座 + OPSD LoRA；参考模型自动固定为此初始状态
 python Qwen/demo/ray_launch.py \
   --stage grpo --backend transformers --schedule parallel \
-  --model ../MSLoc_data/Qwen/received/sft_full --adapter none \
+  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/opsd/last \
   --data ../MSLoc_data/Qwen/demo/data \
   --nli-model ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small \
   --devices 0 --cpus-per-worker 2 --object-store-gb 8 \
@@ -50,6 +54,8 @@ python Qwen/demo/ray_launch.py \
 ```
 
 输出分别在 `../MSLoc_data/Qwen/demo/opsd_ray_single/`、`../MSLoc_data/Qwen/demo/grpo_ray_single/`，重点查看 `steps/` 中的版本、`sync` 确认与概率误差，以及 `report/report.html`。单卡 Actor 时间线仅说明不同进程的执行时序；不能把同卡进程重叠解读为跨 GPU 加速。回载方式见[保存与回载](#checkpoints)：把其中运行目录换为 `opsd_ray_single` 或 `grpo_ray_single`，推理命令传 `--devices 0`。
+
+要接着这次 Ray OPSD 输出跑 GRPO，将 GRPO 的 `--adapter` 改为 `../MSLoc_data/Qwen/demo/opsd_ray_single/checkpoint-32/model`；SFT→GRPO 则改为 `../MSLoc_data/Qwen/sft/last`。如使用全参数权重，传 `--model <完整模型目录> --adapter none --tuner full`，OPSD 的 `--teacher-model` 填完整教师目录。
 
 单卡只有一个生成和一个评分副本，OPSD 的 serial/parallel 不具备多副本并行收益；GRPO 可能有 CPU 奖励与 GPU 参考计算重叠，但仍不是多 GPU 实验。**现阶段优先验流程，无需跑三组 Ray 加速 benchmark。** 显存不足时返回[基础 HF 路线](README.md#single-training)，并把 Ray GPU 验收留为待完成；[CPU 数学与传输测试](#validation)可以单独执行，但不能替代模型训练。
 
@@ -129,35 +135,27 @@ flowchart LR
 每轮记录所有副本的确认、块摘要、传输字节数、前向误差和版本。**字节校验验证传输，前向探针验证加载后的一个实际输入；它不证明 vLLM 所有打包参数及所有输入都数值等价。** 仍须先通过主 README 的全子集 HF/vLLM 输入对齐检查，并完成训练后回载检查。
 
 <a id="environment"></a>
-## 4. 环境、数据和完整权重
+## 4. 环境与数据准备
 
 执行 [主 README：完整环境重建命令](README.md#setup)，其中已安装 Ray 2.59.0，无需在这里重复安装。单卡、多卡共用 `msloc_demo`；与原实验环境的版本差异也在该节列明。之后按主 README 准备模型、数据及 OPSD 教师准入。这里使用 HF 模型和 DDP，不需要将现有权重转换为 Megatron 格式。
 
 `--object-store-gb 8` 要求 `/dev/shm` 至少有 8 GiB 可用空间，还要有足够系统内存。脚本在启动前检查，并关闭对象自动溢出到磁盘；不足时明确失败，避免速度对比悄悄变成磁盘传输测试。容器需在启动配置中分配足够共享内存。修改预算应在三组对比中保持一致。
 
-直接替换完整权重的方式是：
-
-```text
---model ../MSLoc_data/Qwen/received/sft_full --adapter none
---teacher-model ../MSLoc_data/Qwen/received/teacher_full --teacher-adapter none
-```
-
-目录必须包含完整 dense Qwen3.5 HF 权重、tokenizer 和图像/视频 processor；不依赖原训练环境的绝对路径或旧项目状态文件。单独训练器状态或未导出的分片不能直接用。`--tuner lora` 在完整权重上新建语言 LoRA；要更新语言完整参数则用 `--tuner full`。加载完整权重与继续使用全参优化是两件独立的事。
-
-Ray 的教师/参考模型是独立冻结 Actor，因此师生可以指向同一个初始完整权重目录；学生训练不会改变教师进程。已有语言 LoRA 则按主 README 传 `--adapter`，rank/alpha 必须匹配。OPSD 的教师 tokenizer/processor 必须与学生一致。
+权重沿用正式实验：OPSD 学生加载原始底座与 SFT LoRA，教师加载 merge 产物；GRPO 继续训练 OPSD LoRA。具体路径直接列在命令中。
 
 **先上传完整的最终 demo，再执行预检。** 源码指纹包含 demo Python 文件；本次更新前的 teacher gate 和 alignment 不能直接复用。换完整权重、数据或代码后须使用新输出目录重做相应检查。
 
 <a id="multi-training"></a>
 ## 5. 多卡：八卡 OPSD 和 GRPO 命令
 
-先用 HF 生成后端确认真实多角色流程。以下命令均从已经训练过的完整学生权重开始，输出每 8 步保存的模型与训练状态、逐步记录和报告。
+先用 HF 生成后端确认真实多角色流程。以下命令复用正式 SFT / OPSD LoRA，每 8 步保存模型与训练状态，并生成逐步记录和报告。
 
 ```bash
+# OPSD：继续训练 SFT LoRA，merge 教师保持冻结
 python Qwen/demo/ray_launch.py \
   --stage opsd --backend transformers --schedule parallel \
-  --model ../MSLoc_data/Qwen/received/sft_full --adapter none \
-  --teacher-model ../MSLoc_data/Qwen/received/teacher_full --teacher-adapter none \
+  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/sft/last \
+  --teacher-model ../MSLoc_data/Qwen/sft_teacher --teacher-adapter none \
   --teacher-gate ../MSLoc_data/Qwen/demo/gate.json \
   --data ../MSLoc_data/Qwen/demo/data --devices 0,1,2,3,4,5,6,7 \
   --cpus-per-worker 2 --object-store-gb 8 --sync-chunk-mb 256 --sync-atol 0.1 \
@@ -166,9 +164,10 @@ python Qwen/demo/ray_launch.py \
   --max-length 8192 --max-new-tokens 256 \
   --output ../MSLoc_data/Qwen/demo/opsd_ray --resume none
 
+# GRPO：继续训练正式 OPSD LoRA
 python Qwen/demo/ray_launch.py \
   --stage grpo --backend transformers --schedule parallel \
-  --model ../MSLoc_data/Qwen/received/sft_full --adapter none \
+  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/opsd/last \
   --data ../MSLoc_data/Qwen/demo/data \
   --nli-model ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small \
   --devices 0,1,2,3,4,5,6,7 --cpus-per-worker 2 --object-store-gb 8 \
@@ -179,6 +178,8 @@ python Qwen/demo/ray_launch.py \
 ```
 
 要单独切换 vLLM，先按主 README 第 6 节生成 `alignment/alignment.json`，再改 `--backend vllm` 并加 `--alignment ../MSLoc_data/Qwen/demo/alignment/alignment.json --vllm-memory 0.35`。同时更换输出目录，其他参数不变。
+
+要接着本节 OPSD 输出跑 GRPO，将 GRPO 的 `--adapter` 改为 `../MSLoc_data/Qwen/demo/opsd_ray/checkpoint-32/model`。全参数输入的传参同单卡分支，预检必须使用相应模型。
 
 可先用 8 步、每 4 步保存做服务器验收；那只是检查流程。三组正式对比统一使用 32 步，不能一组 8 步、一组 32 步。
 
@@ -198,10 +199,11 @@ python Qwen/demo/ray_launch.py \
 OPSD 三组对比：
 
 ```bash
+# 三组都从同一个 SFT LoRA 开始，使用同一个 merge 教师
 python Qwen/demo/ray_benchmark.py \
   --output-root ../MSLoc_data/Qwen/demo/opsd_ray_benchmark -- \
-  --stage opsd --model ../MSLoc_data/Qwen/received/sft_full --adapter none \
-  --teacher-model ../MSLoc_data/Qwen/received/teacher_full --teacher-adapter none \
+  --stage opsd --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/sft/last \
+  --teacher-model ../MSLoc_data/Qwen/sft_teacher --teacher-adapter none \
   --teacher-gate ../MSLoc_data/Qwen/demo/gate.json \
   --data ../MSLoc_data/Qwen/demo/data \
   --alignment ../MSLoc_data/Qwen/demo/alignment/alignment.json --vllm-memory 0.35 \
@@ -214,9 +216,10 @@ python Qwen/demo/ray_benchmark.py \
 GRPO 三组对比：
 
 ```bash
+# 三组都从同一个 OPSD LoRA 开始，不串接上一组训练的输出
 python Qwen/demo/ray_benchmark.py \
   --output-root ../MSLoc_data/Qwen/demo/grpo_ray_benchmark -- \
-  --stage grpo --model ../MSLoc_data/Qwen/received/sft_full --adapter none \
+  --stage grpo --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/opsd/last \
   --data ../MSLoc_data/Qwen/demo/data \
   --nli-model ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small \
   --alignment ../MSLoc_data/Qwen/demo/alignment/alignment.json --vllm-memory 0.35 \
@@ -260,8 +263,9 @@ benchmark 为保证公平不自动恢复某一组；已有完整独立运行可�
 Ray 的模型放在 `checkpoint-N/model/`，与旧 `train.py` 的 checkpoint 根目录不同。默认 LoRA 回载例子：
 
 ```bash
+# 原始底座 + 本次 Ray 输出的 LoRA；注意 checkpoint 下还有 model/ 目录
 python Qwen/demo/inspect_model.py \
-  --mode student --model ../MSLoc_data/Qwen/received/sft_full \
+  --mode student --model ../Qwen/Qwen3.5-4B \
   --adapter ../MSLoc_data/Qwen/demo/opsd_ray/checkpoint-32/model \
   --data ../MSLoc_data/Qwen/demo/data --devices 0,1,2,3,4,5,6,7 \
   --max-length 8192 --max-new-tokens 256 \
