@@ -316,6 +316,27 @@ python Qwen/demo/train.py \
 输出 LoRA：`../MSLoc_data/Qwen/demo/opsd_hf/checkpoint-32/`。
 输出训练曲线：`../MSLoc_data/Qwen/demo/opsd_hf/report/report.html`。
 
+**单卡在生成回答时显存不足：** 上面的命令每轮一起生成 8 份回答，学生和教师也同时占用显存。SFT 能跑通不代表这一步也能装进同一张卡。可显式增加 `--generation-batch-size 1`：每轮生成 1 份回答、计算梯度，累积 8 次后更新一次参数，`--global-batch-size 8` 保持不变。不传新参数时仍沿用原来的生成批量。
+
+例如，若第一步就报 `CUDA out of memory`、进度仍为 `0/32`，更新 `train.py` 后可以运行：
+
+```bash
+python Qwen/demo/train.py \
+  --stage opsd --backend transformers \
+  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/sft/last \
+  --teacher-model ../MSLoc_data/Qwen/sft_teacher --teacher-adapter none \
+  --teacher-gate ../MSLoc_data/Qwen/demo/gate.json \
+  --data ../MSLoc_data/Qwen/demo/data --devices 0 \
+  --tuner lora --lora-rank 16 --lora-alpha 32 \
+  --steps 32 --save-steps 8 --global-batch-size 8 --generation-batch-size 1 \
+  --learning-rate 2e-5 --max-length 8192 --max-new-tokens 256 \
+  --output ../MSLoc_data/Qwen/demo/opsd_hf --resume none --clean
+```
+
+`--clean` 清理本次失败的 `opsd_hf` 目录后重新开始，不删除 SFT、教师权重或教师检查结果。已有需要保留的训练结果时，改用新的 `--output` 目录。输出位置与上面相同。
+
+这使用的是 [ms-swift 原有的生成批量参数](https://github.com/modelscope/ms-swift/blob/v4.5.3/swift/rlhf_trainers/args_mixin.py)，训练目标和每次更新的样本数不变；分批会改变随机采样顺序，不保证生成相同回答。它能降低生成阶段的峰值显存，但尚未在 24 GB 卡上验证整个训练能否完成。若仍然溢出，需要根据新的报错位置判断，不能保证只改这一项就足够。GRPO 的生成批量还必须是 `--num-generations` 的整数倍，例如 4，不能照抄 1。比较速度时，两次运行应使用相同的生成批量。
+
 如果继续做全参数训练，改为 `--model <完整学生目录> --adapter none --tuner full`，`--teacher-model` 填独立完整教师目录；第 4 节也要使用这两份模型检查。视觉部分仍冻结。
 
 训练完成后，按 [7.1](#reload) 加载新权重查看回答。

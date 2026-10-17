@@ -47,6 +47,9 @@ def main():
     p.add_argument("--steps", type=int, default=32)
     p.add_argument("--save-steps", type=int, default=8)
     p.add_argument("--global-batch-size", type=int, default=8)
+    p.add_argument("--generation-batch-size", type=int, default=None,
+                   help="OPSD/GRPO completions per rollout across GPUs; defaults to global-batch-size. "
+                        "Does not change gradient accumulation or samples per optimizer update.")
     p.add_argument("--num-generations", type=int, default=4)
     p.add_argument("--learning-rate", type=float, required=True)
     p.add_argument("--max-length", type=int, default=8192)
@@ -67,6 +70,19 @@ def main():
         raise ValueError("SFT has no on-policy rollout; use --backend transformers.")
     if args.stage == "grpo" and (args.num_generations < 2 or args.global_batch_size % args.num_generations):
         raise ValueError("GRPO batch counts completions and must be divisible by num-generations >=2.")
+    if args.stage == "sft" and args.generation_batch_size is not None:
+        raise ValueError("SFT has no rollout; omit --generation-batch-size.")
+    generation_batch = (args.global_batch_size if args.generation_batch_size is None
+                        else args.generation_batch_size)
+    if args.stage != "sft":
+        # Follow swift RolloutTrainerArgumentsMixin._init_generation_batch_params.
+        # Restrict this synchronous demo to complete rollout groups within an update.
+        if (generation_batch <= 0 or generation_batch % len(devices)
+                or args.global_batch_size % generation_batch):
+            raise ValueError("generation-batch-size must be positive, divisible by GPU count, "
+                             "and divide global-batch-size.")
+        if args.stage == "grpo" and generation_batch % args.num_generations:
+            raise ValueError("GRPO generation-batch-size must include complete num-generations groups.")
     if args.tuner == "full" and args.adapter != "none":
         raise ValueError("For full tuning, export/merge the adapter first, then pass the complete model.")
     if args.adapter != "none":
@@ -193,7 +209,7 @@ def main():
     if args.stage != "sft":
         add("remove_unused_columns", "false")
         add("async_generate", "false")
-        add("generation_batch_size", args.global_batch_size)
+        add("generation_batch_size", generation_batch)
         add("max_completion_length", args.max_new_tokens)
         add("log_completions", "true")
         add("top_k", -1)
@@ -213,6 +229,9 @@ def main():
               "samples": len(rows), "unique_inputs_per_batch": unique_per_batch}
     print(f"Stage={args.stage} | backend={args.backend} | GPUs={len(devices)} | tuner={args.tuner}")
     print(f"Samples={len(rows)} | batch={args.global_batch_size} | unique inputs/batch={unique_per_batch}")
+    if args.stage != "sft":
+        print(f"Rollout completions={generation_batch} across GPUs | "
+              f"gradient accumulation={args.global_batch_size // len(devices)}")
     print("Command:\n" + shlex.join(command))
     if args.plan_only:
         return
