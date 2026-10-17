@@ -17,8 +17,8 @@ def main():
     parser.add_argument("--opsd-dataset", required=True)
     parser.add_argument("--opsd-targets", required=True)
     parser.add_argument("--annotation", required=True)
-    parser.add_argument("--samples", type=int, default=256,
-                        help="Total proposal clips across fake and real, shared by all demo stages (default: 256).")
+    parser.add_argument("--samples", type=int, default=64,
+                        help="Total proposal clips across fake and real, shared by all demo stages (default: 64).")
     parser.add_argument("--path-map", action="append", default=[], metavar="OLD=NEW",
                         help="Explicit clip path prefix replacement; repeat for multiple roots.")
     parser.add_argument("--output", required=True)

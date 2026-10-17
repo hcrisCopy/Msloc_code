@@ -144,24 +144,24 @@ hf download cross-encoder/nli-deberta-v3-small --local-dir ../MSLoc_data/Qwen/ck
 
 直接使用已有 `opsd_data/train.jsonl`、`targets.jsonl` 及视频片段，不重新生成 proposal。若尚未准备这些数据，先按根目录 README 的 `prepare_opsd.py` 步骤准备。
 
-**`--samples 256` 表示整个 demo 一共抽取 256 个 proposal 视频片段，fake 和 real 合计 256 个。** 各阶段共用这一批片段，不分别抽取。按原数据的 fake/real 比例随机抽样，seed=42。
+**`--samples 64` 表示整个 demo 一共抽取 64 个 proposal 视频片段，fake 和 real 合计 64 个。** 各阶段共用这一批片段，不分别抽取。按原数据的 fake/real 比例随机抽样，seed=42。
 
 ```bash
 python Qwen/demo/prepare.py \
   --opsd-dataset ../MSLoc_data/Qwen/opsd_data/train.jsonl \
   --opsd-targets ../MSLoc_data/Qwen/opsd_data/targets.jsonl \
   --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json \
-  --samples 256 --output ../MSLoc_data/Qwen/demo/data --resume none
+  --samples 64 --output ../MSLoc_data/Qwen/demo/data --resume none
 ```
 
 输出保存在 `../MSLoc_data/Qwen/demo/data/`：
 
 | 文件 | 样本数量与用途 |
 |---|---|
-| `opsd.jsonl` | 这 256 个片段，用于学生和教师推理；OPSD 训练时只用教师检查通过的部分，因此实际训练样本可能少于 256 个 |
-| `grpo.jsonl` | 同样的 256 个片段，用于 GRPO 训练 |
-| `sft.jsonl` | 只取这 256 个片段中的 fake，用于 SFT 训练 |
-| `targets.jsonl` | 这 256 个片段对应的真实标签和时间区间 |
+| `opsd.jsonl` | 这 64 个片段，用于学生和教师推理；OPSD 训练时只用教师检查通过的部分，因此实际训练样本可能少于 64 个 |
+| `grpo.jsonl` | 同样的 64 个片段，用于 GRPO 训练 |
+| `sft.jsonl` | 只取这 64 个片段中的 fake，用于 SFT 训练 |
+| `targets.jsonl` | 这 64 个片段对应的真实标签和时间区间 |
 | `manifest.json` | 记录抽样设置、原数据和抽样后的 fake/real 数量 |
 
 如果教师检查提示缺少 fake 或 real，说明抽取数量太少，将 `--samples` 调大后重新准备数据。
@@ -191,7 +191,7 @@ python Qwen/merge_sft_teacher.py \
 
 ### 4.2 分别运行学生和教师推理
 
-两者都处理前面抽出的 256 个片段。学生使用普通提示词；教师额外看到真假标签、正确时间区间和解释提示。
+两者都处理前面抽出的 64 个片段。学生使用普通提示词；教师额外看到真假标签、正确时间区间和解释提示。
 
 **这一步怎么算：** 模型读取每个片段的 40 帧，逐个生成回答 token；这里每次选概率最高的 token，即贪心生成。输出包含解释和定位区间，正常片段输出 `Real`。预测时间相对于当前片段，例如原视频 `[100,140]` 秒的片段中，`[10,25]` 表示原视频的 `[110,125]` 秒。这里只推理，不更新参数。
 
