@@ -10,6 +10,7 @@ from pathlib import Path
 
 from demo_utils import (check_versions, data_identity, device_ids, environment, latest_checkpoint,
                         model_identity, prepare_output, read_json, read_rows, relative, require_root,
+                        require_matching_processors,
                         sha256, source_identity, write_json, write_rows)
 
 
@@ -78,9 +79,7 @@ def main():
         if args.teacher_model == "none" or args.teacher_gate == "none":
             raise ValueError("OPSD requires explicit --teacher-model and --teacher-gate.")
         teacher = model_identity(args.teacher_model, args.teacher_adapter)
-        for asset in ("tokenizer.json", "tokenizer_config.json", "preprocessor_config.json", "video_preprocessor_config.json"):
-            if sha256(Path(args.model) / asset) != sha256(Path(args.teacher_model) / asset):
-                raise ValueError(f"Teacher/student must use identical tokenizer and processor assets: {asset}")
+        require_matching_processors(weights, teacher)
         same_base = Path(args.model).resolve() == Path(args.teacher_model).resolve()
         if same_base and (args.tuner != "lora" or args.adapter != "none" or args.teacher_adapter != "none"):
             raise ValueError("For this combination export a separate complete frozen teacher directory; same-path swift self-distillation would change teacher semantics.")

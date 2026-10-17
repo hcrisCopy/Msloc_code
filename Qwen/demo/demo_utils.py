@@ -93,17 +93,59 @@ def check_versions(vllm=False):
     return expected
 
 
+def processor_identity(model):
+    """Read effective local settings through Transformers, independent of export layout.
+
+    Transformers 5.9 saves nested image/video settings in processor_config.json,
+    while older exports use separate preprocessor files. Do not copy base assets
+    or guess defaults to repair an incomplete export.
+    """
+    from transformers import AutoProcessor
+
+    model = Path(model)
+    nested_path = model / "processor_config.json"
+    nested = read_json(nested_path) if nested_path.is_file() else {}
+    for component, filename in (("image_processor", "preprocessor_config.json"),
+                                ("video_processor", "video_preprocessor_config.json")):
+        if component in nested:
+            if not isinstance(nested[component], dict) or not nested[component]:
+                raise ValueError(f"Invalid {component} in {nested_path}")
+        elif not (model / filename).is_file():
+            raise FileNotFoundError(
+                f"Missing {component}: need {nested_path} containing '{component}' or {model / filename}.")
+
+    processor = AutoProcessor.from_pretrained(str(model), local_files_only=True, trust_remote_code=False)
+    for component in ("tokenizer", "image_processor", "video_processor"):
+        if getattr(processor, component, None) is None:
+            raise ValueError(f"Loaded processor has no {component}: {model}")
+    tokenizer = processor.tokenizer
+    settings = {
+        "processor": json.loads(processor.to_json_string()),
+        "chat_template": processor.chat_template,
+        "tokenizer": json.loads(tokenizer.backend_tokenizer.to_str()),
+        "special_tokens": tokenizer.special_tokens_map,
+        "tokenizer_settings": {key: getattr(tokenizer, key) for key in
+                               ("padding_side", "truncation_side", "model_max_length")},
+    }
+    return {key: digest(value) for key, value in settings.items()}
+
+
+def require_matching_processors(student, teacher):
+    """Compare loaded settings rather than filenames or JSON whitespace."""
+    for key, value in student["processor"].items():
+        if value != teacher["processor"][key]:
+            raise ValueError(f"Teacher/student processing differs: {key}")
+
+
 def model_identity(model, adapter="none"):
     """Validate HF exports. Weight file stats detect changes without repeatedly hashing GBs."""
     model = Path(model)
     config = read_json(model / "config.json")
     if config.get("model_type") != "qwen3_5":
         raise ValueError("This demo targets dense Qwen3.5 (model_type=qwen3_5), not another architecture/MoE.")
-    for name in ("tokenizer_config.json", "preprocessor_config.json", "video_preprocessor_config.json"):
+    for name in ("tokenizer_config.json", "tokenizer.json"):
         if not (model / name).is_file():
-            raise FileNotFoundError(f"HF export missing {model / name}; include processor assets from its base model.")
-    if not (model / "tokenizer.json").is_file():
-        raise FileNotFoundError(model / "tokenizer.json")
+            raise FileNotFoundError(f"HF export missing tokenizer file: {model / name}")
     weights = sorted(model.glob("*.safetensors"))
     if not weights or any(p.name.startswith("adapter_model") for p in weights):
         raise ValueError(f"--model needs complete HF model weights, not an adapter or raw training checkpoint: {model}")
@@ -116,7 +158,7 @@ def model_identity(model, adapter="none"):
         raise FileNotFoundError(f"Sharded model needs model.safetensors.index.json: {model}")
     metadata = {p.name: sha256(p) for p in sorted(model.iterdir())
                 if p.is_file() and p.suffix in (".json", ".jinja", ".txt")}
-    result = {"model": relative(model), "metadata": metadata,
+    result = {"model": relative(model), "metadata": metadata, "processor": processor_identity(model),
               "weights": {p.name: [p.stat().st_size, p.stat().st_mtime_ns] for p in weights}, "adapter": None}
     if adapter != "none":
         adapter = Path(adapter)

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from demo_utils import (check_versions, data_identity, device_ids, environment, model_identity,
                         prepare_output, read_json, read_rows, relative, require_root, sha256,
-                        source_identity, write_json, write_rows)
+                        source_identity, write_json, write_rows, require_matching_processors)
 from ray_protocol import batch_indices, make_layout, validate_jobs
 
 
@@ -80,9 +80,7 @@ def validate(args):
     dataset = Path(args.data) / f"{args.stage}.jsonl"
     if args.stage == "opsd":
         teacher = model_identity(args.teacher_model, args.teacher_adapter)
-        for name in ("tokenizer.json", "tokenizer_config.json", "preprocessor_config.json", "video_preprocessor_config.json"):
-            if sha256(Path(args.model) / name) != sha256(Path(args.teacher_model) / name):
-                raise ValueError(f"Teacher/student tokenizer or processor differs: {name}")
+        require_matching_processors(weights, teacher)
         gate = read_json(args.teacher_gate)
         if (gate["passed"] is not True or gate["student"]["weights"] != weights
                 or gate["teacher"]["weights"] != teacher or gate["student"]["data"] != data

@@ -498,6 +498,7 @@ python Qwen/demo/view_predictions.py \
 
 ## 实现依据
 
+- [Transformers 5.9 视频配置加载](https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/video_processing_utils.py)：支持 `processor_config.json` 中的嵌套配置和独立配置文件；师生比较实际加载后的设置。
 - 项目现有 `Qwen/common.py`、`opsd_common.py`、`prepare_grpo.py`、`trace_video_template.py`、`grpo_rewards.py`、`grpo_logging.py`。
 - [ms-swift 4.5.3 GKD trainer](https://github.com/modelscope/ms-swift/blob/v4.5.3/swift/rlhf_trainers/gkd_trainer.py)、[GKD loss](https://github.com/modelscope/ms-swift/blob/v4.5.3/swift/rlhf_trainers/gkd_loss.py)、[GRPO trainer](https://github.com/modelscope/ms-swift/blob/v4.5.3/swift/rlhf_trainers/grpo_trainer.py)、[rollout 与权重同步](https://github.com/modelscope/ms-swift/blob/v4.5.3/swift/rlhf_trainers/rollout_mixin.py)。
 - [vLLM 0.19.1 Qwen3-VL 多模态处理器](https://github.com/vllm-project/vllm/blob/v0.19.1/vllm/model_executor/models/qwen3_vl.py)：Qwen3.5 使用同系列视频处理接口，demo 添加原始时间戳桥接并要求实际对齐检查。
