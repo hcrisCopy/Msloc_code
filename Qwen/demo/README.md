@@ -286,6 +286,10 @@ python Qwen/demo/train.py \
 
 先完成第 4 节教师检查。学生从 `sft/last` 开始更新，教师使用合并后的 `sft_teacher` 并始终保持不变。
 
+已有 LoRA 直接通过 `--adapter` 加载，不用修改 `adapter_config.json`。其中 `target_modules` 写成正则表达式也是 [PEFT 支持的格式](https://huggingface.co/docs/peft/v0.20.0/en/package_reference/lora#peft.LoraConfig)。
+
+`train.py` 读取教师检查和 vLLM 对齐结果时，允许训练入口 `train.py` 自身发生变化；其余记录的 Python 文件仍逐一核对。
+
 **每一步怎么算：**
 
 1. 学生只看视频和普通提示词，按当前模型的概率采样回答。这一步生成的回答就是本轮训练所用的回答。

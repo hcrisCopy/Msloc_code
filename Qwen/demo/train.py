@@ -14,6 +14,19 @@ from demo_utils import (check_versions, data_identity, device_ids, environment, 
                         sha256, source_identity, write_json, write_rows)
 
 
+def require_precheck_source(saved, current):
+    """The training CLI is not imported by inference or teacher-gate scripts.
+
+    Keep every other recorded file strict, including shared utilities, templates
+    and gate logic. Training resume still compares the complete source identity.
+    """
+    training_entry = "Qwen/demo/train.py"
+    changed = sorted(path for path in set(saved) | set(current)
+                     if path != training_entry and saved.get(path) != current.get(path))
+    if changed:
+        raise ValueError("Precheck source changed: " + ", ".join(changed))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--stage", choices=["sft", "opsd", "grpo"], required=True)
@@ -60,11 +73,17 @@ def main():
         adapter_cfg = read_json(Path(args.adapter) / "adapter_config.json")
         if adapter_cfg["r"] != args.lora_rank or adapter_cfg["lora_alpha"] != args.lora_alpha:
             raise ValueError("Set --lora-rank/--lora-alpha to the supplied adapter's actual configuration.")
-        targets = adapter_cfg.get("target_modules", [])
-        if isinstance(targets, str) and targets != "all-linear":
-            raise ValueError("Regex LoRA targets need explicit vLLM compatibility review; use a standard language LoRA.")
-        if any("visual" in str(t) or "vision" in str(t) for t in targets):
-            raise ValueError("This demo freezes vision and does not support vision LoRA.")
+        # PEFT accepts regex target_modules; load the saved configuration unchanged,
+        # as Qwen/train_opsd.py does. Inspect actual tensor names, not regex text
+        # (which may mention visual modules only to exclude them).
+        from safetensors import safe_open
+        with safe_open(str(Path(args.adapter) / "adapter_model.safetensors"),
+                       framework="pt", device="cpu") as saved_adapter:
+            visual_weights = [name for name in saved_adapter.keys()
+                              if "visual" in name or "vision" in name]
+        if visual_weights:
+            raise ValueError("This demo freezes vision; adapter contains visual weights: "
+                             + ", ".join(visual_weights[:3]))
     weights = model_identity(args.model, args.adapter)
     data_hash = data_identity(args.data)
     versions = check_versions(args.backend == "vllm")
@@ -85,9 +104,10 @@ def main():
             raise ValueError("For this combination export a separate complete frozen teacher directory; same-path swift self-distillation would change teacher semantics.")
         gate = read_json(args.teacher_gate)
         if (gate["passed"] is not True or gate["student"]["weights"] != weights
-                or gate["teacher"]["weights"] != teacher or gate["student"]["data"] != data_hash
-                or gate["student"]["source"] != sources):
-            raise ValueError("Teacher gate does not match the current student, teacher, data or source.")
+                or gate["teacher"]["weights"] != teacher or gate["student"]["data"] != data_hash):
+            raise ValueError("Teacher gate does not match the current student, teacher or data.")
+        for role in ("student", "teacher"):
+            require_precheck_source(gate[role]["source"], sources)
         dataset = Path(gate["dataset"])
         if sha256(dataset) != gate["dataset_sha256"]:
             raise ValueError("Teacher-filtered dataset changed.")
@@ -109,9 +129,10 @@ def main():
         alignment = read_json(args.alignment)
         expected_base = model_identity(args.model)
         if (alignment["passed"] is not True or alignment["config"]["weights"] != expected_base
-                or alignment["config"]["data"] != data_hash or alignment["config"]["source"] != sources
+                or alignment["config"]["data"] != data_hash
                 or alignment["config"]["max_length"] != args.max_length):
             raise ValueError("Alignment report does not match the current model, data, source or max-length.")
+        require_precheck_source(alignment["config"]["source"], sources)
         extra_inputs["alignment_sha256"] = sha256(args.alignment)
         protected.append(args.alignment)
     unique_per_batch = args.global_batch_size // (args.num_generations if args.stage == "grpo" else 1)
