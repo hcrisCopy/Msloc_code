@@ -10,7 +10,7 @@
 
 输入权重与主 README 一致：OPSD 继续训练 SFT LoRA，教师使用原 merge 产物；GRPO 继续训练 OPSD LoRA。Ray 重新组织了训练循环，并非直接调用正式训练脚本；数值一致性尚待 GPU 实测。
 
-**当前交付状态：代码与静态接口核对已完成，尚未在目标 GPU 服务器运行。** 下列测试、权重回载和加速实验须在服务器执行，不能把代码存在当作训练通过或已经提速的证据。所有命令从 `Msloc_code/` 执行，输出放在 `../MSLoc_data/Qwen/demo/`。
+**当前验证状态：8 项 CPU 数学与 Ray 传输测试、OPSD/GRPO 单卡参数预检已在服务器通过；Ray 模型训练、DDP 和多卡加速尚未实测。** 参数预检使用 `--plan-only`，不加载 GPU 模型。本例三个 4B 模型副本的权重就超过 24 GB，当前 RTX 4090 D 使用主 README 的基础训练路线。所有命令从 `Msloc_code/` 执行，输出放在 `../MSLoc_data/Qwen/demo/`。
 
 <a id="single-gpu"></a>
 ## 单卡分支：可选的 Ray 流程验证
@@ -32,7 +32,7 @@ python Qwen/demo/ray_launch.py \
   --stage opsd --backend transformers --schedule parallel \
   --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/sft/last \
   --teacher-model ../MSLoc_data/Qwen/sft_teacher --teacher-adapter none \
-  --teacher-gate ../MSLoc_data/Qwen/demo/gate.json \
+  --teacher-gate ../MSLoc_data/Qwen/demo/teacher_gate.json \
   --data ../MSLoc_data/Qwen/demo/data --devices 0 \
   --cpus-per-worker 2 --object-store-gb 8 --sync-chunk-mb 256 --sync-atol 0.1 \
   --tuner lora --lora-rank 16 --lora-alpha 32 \
@@ -43,7 +43,7 @@ python Qwen/demo/ray_launch.py \
 # GRPO：原始底座 + OPSD LoRA；参考模型自动固定为此初始状态
 python Qwen/demo/ray_launch.py \
   --stage grpo --backend transformers --schedule parallel \
-  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/opsd/last \
+  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/demo/opsd_hf/checkpoint-32 \
   --data ../MSLoc_data/Qwen/demo/data \
   --nli-model ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small \
   --devices 0 --cpus-per-worker 2 --object-store-gb 8 \
@@ -156,7 +156,7 @@ python Qwen/demo/ray_launch.py \
   --stage opsd --backend transformers --schedule parallel \
   --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/sft/last \
   --teacher-model ../MSLoc_data/Qwen/sft_teacher --teacher-adapter none \
-  --teacher-gate ../MSLoc_data/Qwen/demo/gate.json \
+  --teacher-gate ../MSLoc_data/Qwen/demo/teacher_gate.json \
   --data ../MSLoc_data/Qwen/demo/data --devices 0,1,2,3,4,5,6,7 \
   --cpus-per-worker 2 --object-store-gb 8 --sync-chunk-mb 256 --sync-atol 0.1 \
   --tuner lora --lora-rank 16 --lora-alpha 32 \
@@ -167,7 +167,7 @@ python Qwen/demo/ray_launch.py \
 # GRPO：继续训练正式 OPSD LoRA
 python Qwen/demo/ray_launch.py \
   --stage grpo --backend transformers --schedule parallel \
-  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/opsd/last \
+  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/demo/opsd_hf/checkpoint-32 \
   --data ../MSLoc_data/Qwen/demo/data \
   --nli-model ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small \
   --devices 0,1,2,3,4,5,6,7 --cpus-per-worker 2 --object-store-gb 8 \
@@ -204,7 +204,7 @@ python Qwen/demo/ray_benchmark.py \
   --output-root ../MSLoc_data/Qwen/demo/opsd_ray_benchmark -- \
   --stage opsd --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/sft/last \
   --teacher-model ../MSLoc_data/Qwen/sft_teacher --teacher-adapter none \
-  --teacher-gate ../MSLoc_data/Qwen/demo/gate.json \
+  --teacher-gate ../MSLoc_data/Qwen/demo/teacher_gate.json \
   --data ../MSLoc_data/Qwen/demo/data \
   --alignment ../MSLoc_data/Qwen/demo/alignment/alignment.json --vllm-memory 0.35 \
   --devices 0,1,2,3,4,5,6,7 --cpus-per-worker 2 --object-store-gb 8 \
@@ -219,7 +219,7 @@ GRPO 三组对比：
 # 三组都从同一个 OPSD LoRA 开始，不串接上一组训练的输出
 python Qwen/demo/ray_benchmark.py \
   --output-root ../MSLoc_data/Qwen/demo/grpo_ray_benchmark -- \
-  --stage grpo --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/opsd/last \
+  --stage grpo --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/demo/opsd_hf/checkpoint-32 \
   --data ../MSLoc_data/Qwen/demo/data \
   --nli-model ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small \
   --alignment ../MSLoc_data/Qwen/demo/alignment/alignment.json --vllm-memory 0.35 \

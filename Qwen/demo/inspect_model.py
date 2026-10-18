@@ -70,7 +70,10 @@ def worker(args):
     visible = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
     os.environ["CUDA_VISIBLE_DEVICES"] = visible[local_rank]
     # These are independent inference replicas, not a distributed model.
-    for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
+    # torch.distributed.rendezvous._create_c10d_store otherwise makes vLLM's
+    # rank zero connect as a client to its new port, where no server exists.
+    for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT",
+                "TORCHELASTIC_USE_AGENT_STORE", "TORCHELASTIC_RUN_ID"):
         os.environ.pop(key, None)
     import torch
     from tqdm import tqdm
@@ -96,7 +99,16 @@ def worker(args):
     if args.mode == "alignment":
         # This hook observes real vLLM preprocessing, not a reconstructed approximation.
         from vllm.model_executor.models.qwen3_vl import Qwen3VLMultiModalProcessor
+        from vllm.multimodal.processing.context import InputProcessingContext
         original = Qwen3VLMultiModalProcessor._call_hf_processor
+        original_postprocess = InputProcessingContext._postprocess_output
+
+        def capture_processor_output(self, output):
+            # vLLM casts processor outputs to model dtype here. Observe the
+            # original pixels too, so BF16 rounding cannot hide a mismatch.
+            if isinstance(output, dict) and "pixel_values_videos" in output:
+                capture["processor_pixels"] = output["pixel_values_videos"].detach().cpu()
+            return original_postprocess(self, output)
 
         def capture_pixels(self, *values, **kwargs):
             result = original(self, *values, **kwargs)
@@ -106,6 +118,7 @@ def worker(args):
             return result
 
         Qwen3VLMultiModalProcessor._call_hf_processor = capture_pixels
+        InputProcessingContext._postprocess_output = capture_processor_output
         engine = VllmEngine(args.model, torch_dtype=torch.bfloat16, use_async_engine=False,
                             gpu_memory_utilization=args.vllm_memory, max_model_len=args.max_length,
                             tensor_parallel_size=1, seed=42, mm_processor_cache_gb=0,
@@ -141,13 +154,21 @@ def worker(args):
                 response = engine.infer([request], request_config=request_config)[0]
                 hf_ids = hf["input_ids"]
                 ids_match = list(hf_ids) == list(response.prompt_token_ids)
-                if "pixels" not in capture:
+                if "pixels" not in capture or "processor_pixels" not in capture:
                     raise RuntimeError("vLLM pixel observation did not fire; cannot certify alignment.")
                 expected_pixels = hf["pixel_values_videos"].cpu()
-                pixels_match = expected_pixels.shape == capture["pixels"].shape and torch.equal(expected_pixels, capture["pixels"])
+                processor_match = torch.equal(expected_pixels, capture["processor_pixels"])
+                # Qwen3.5 HF get_image_features (also used for video) casts
+                # pixels to visual.dtype; vLLM performs this cast earlier.
+                if capture["pixels"].dtype != torch.bfloat16:
+                    raise TypeError("Expected BF16 vLLM model inputs for this BF16 alignment run.")
+                pixels_match = torch.equal(expected_pixels.to(torch.bfloat16), capture["pixels"])
                 grid_match = torch.equal(hf["video_grid_thw"].cpu(), capture["grid"])
-                record.update(aligned=bool(ids_match and pixels_match and grid_match),
+                record.update(aligned=bool(ids_match and processor_match and pixels_match and grid_match),
                               token_ids_equal=ids_match, pixels_equal=pixels_match, grid_equal=grid_match,
+                              processor_pixels_equal=processor_match,
+                              hf_pixel_dtype=str(expected_pixels.dtype),
+                              vllm_pixel_dtype=str(capture["pixels"].dtype),
                               hf_tokens=len(hf_ids), vllm_tokens=len(response.prompt_token_ids),
                               pixel_shape=list(expected_pixels.shape))
             else:

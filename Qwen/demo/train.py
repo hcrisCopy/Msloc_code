@@ -15,14 +15,14 @@ from demo_utils import (check_versions, data_identity, device_ids, environment, 
 
 
 def require_precheck_source(saved, current):
-    """The training CLI is not imported by inference or teacher-gate scripts.
+    """Training-only files are not imported by inference or teacher-gate scripts.
 
     Keep every other recorded file strict, including shared utilities, templates
     and gate logic. Training resume still compares the complete source identity.
     """
-    training_entry = "Qwen/demo/train.py"
+    training_only = {"Qwen/demo/train.py", "Qwen/demo/opsd_loss_plugin.py"}
     changed = sorted(path for path in set(saved) | set(current)
-                     if path != training_entry and saved.get(path) != current.get(path))
+                     if path not in training_only and saved.get(path) != current.get(path))
     if changed:
         raise ValueError("Precheck source changed: " + ", ".join(changed))
 
@@ -50,6 +50,9 @@ def main():
     p.add_argument("--generation-batch-size", type=int, default=None,
                    help="OPSD/GRPO completions per rollout across GPUs; defaults to global-batch-size. "
                         "Does not change gradient accumulation or samples per optimizer update.")
+    p.add_argument("--jsd-chunk-size", type=int, default=32,
+                   help="OPSD response tokens per checkpointed full-vocabulary JSD block; "
+                        "0 uses unmodified swift loss. No effect on SFT/GRPO.")
     p.add_argument("--num-generations", type=int, default=4)
     p.add_argument("--learning-rate", type=float, required=True)
     p.add_argument("--max-length", type=int, default=8192)
@@ -60,6 +63,8 @@ def main():
     p.add_argument("--plan-only", action="store_true", help="Validate inputs and print command without loading GPUs or writing output")
     args = p.parse_args()
     require_root()
+    if args.jsd_chunk_size < 0:
+        raise ValueError("--jsd-chunk-size must be >= 0.")
     devices = device_ids(args.devices)
     if (min(args.steps, args.save_steps, args.global_batch_size, args.max_new_tokens,
             args.lora_rank, args.lora_alpha) <= 0 or args.learning_rate <= 0
@@ -201,6 +206,8 @@ def main():
         if args.adapter != "none":
             add("ref_adapters", args.adapter)
     if args.stage == "opsd":
+        if args.jsd_chunk_size:
+            plugins.append("Qwen/demo/opsd_loss_plugin.py")
         add("teacher_model", args.teacher_model)
         if args.teacher_adapter != "none":
             add("teacher_adapters", args.teacher_adapter)
@@ -244,6 +251,10 @@ def main():
         write_rows(train_dataset, rows)
     env = environment(args.devices)
     env["MSLOC_DEMO_RUN"] = relative(output)
+    # Set this explicitly so an inherited value cannot silently enable the plugin.
+    env.pop("MSLOC_DEMO_JSD_CHUNK_SIZE", None)
+    if args.stage == "opsd" and args.jsd_chunk_size:
+        env["MSLOC_DEMO_JSD_CHUNK_SIZE"] = str(args.jsd_chunk_size)
     if args.stage == "grpo":
         env["MSLOC_GRPO_NLI_MODEL"] = relative(args.nli_model)
     subprocess.run([sys.executable, "Qwen/demo/check_lengths.py", "--model", args.model,

@@ -20,7 +20,24 @@
 
 阅读顺序：**本页选路线 → 讲解提纲理解算法 → 执行所选路线 → 面试清单自测**。选择 Ray 路线时再进入 Ray 文档，不需要把所有文档从头到尾重复读。
 
-本页直达：[单卡能做什么](#single-gpu) · [多卡增加什么](#multi-gpu) · [环境与权重](#setup) · [数据准备](#data) · [查看回答/检查教师](#preflight) · [单卡训练](#single-training) · [单卡 vLLM 对比](#single-vllm) · [Ray 命令入口](#multi-ray) · [查看训练后的回答](#reload) · [中断后接着跑](#resume) · [结果文件](#deliverables)
+本页直达：[本次实测](#verified) · [单卡能做什么](#single-gpu) · [多卡增加什么](#multi-gpu) · [环境与权重](#setup) · [数据准备](#data) · [查看回答/检查教师](#preflight) · [单卡训练](#single-training) · [单卡 vLLM 对比](#single-vllm) · [Ray 命令入口](#multi-ray) · [查看训练后的回答](#reload) · [中断后接着跑](#resume) · [结果文件](#deliverables)
+
+<a id="verified"></a>
+## 本次服务器实测（2026-10-18）
+
+使用 RTX 4090 D 24 GB 和原有 `msloc_qwen35` 环境。数据共 64 个片段：54 个 fake、10 个 real。以下结果已保存在服务器 `../MSLoc_data/Qwen/demo/`。
+
+| 项目 | 实际完成情况 |
+|---|---|
+| 已有 SFT | 复核了原先完成的 32 步结果和 checkpoint，未重复训练 |
+| 学生、完整教师预检 | 各完成 64 条；教师检查通过，保留 64 条；新结果为 `teacher_gate.json` |
+| OPSD / Transformers | 完成 32 步，保存 `checkpoint-32`；回载后完成 64 条推理 |
+| GRPO / Transformers、vLLM | 各完成 32 步、各完成 64 条回载推理；vLLM 记录了 32 次权重同步调用 |
+| HF / vLLM 输入对齐 | 64 条全部通过，检查文本 token、原始像素、BF16 像素和时空网格 |
+| 推理续跑 | `--resume auto` 检查通过，已有 64 条结果保持一致且没有重复 |
+| Ray | 8 项 CPU 数学与传输测试、OPSD/GRPO 参数预检通过；GPU 多角色训练和多卡 DDP 尚未实测 |
+
+GRPO 本次整步速度约 **1.18 倍**，详见 [6.3 的实测表](#speed-results)。训练后仍有错误回答，实际指标和页面见 [7.1](#reload)。Ray 的三个模型副本无法同时装入这张 24 GB 卡，其 GPU 训练按 [Ray 文档](Ray多角色训练.md)另行验证。
 
 ## 1. 按硬件选择演示范围
 
@@ -230,14 +247,14 @@ python Qwen/demo/teacher_gate.py \
   --student-run ../MSLoc_data/Qwen/demo/student_before \
   --teacher-run ../MSLoc_data/Qwen/demo/teacher_before \
   --data ../MSLoc_data/Qwen/demo/data --min-iou 0.5 \
-  --output ../MSLoc_data/Qwen/demo/gate.json
+  --output ../MSLoc_data/Qwen/demo/teacher_gate.json
 ```
 
 打开 `../MSLoc_data/Qwen/demo/predictions.html`，查看视频、两者回答，以及预测区间和正确区间。页面中的视频链接需要原视频文件仍在对应位置。
 
 检查通过需要满足三点：教师在 fake 上的平均定位 IoU 高于学生；fake、real 的分类准确率都不降低；格式错误不增加。
 
-结果写入 `../MSLoc_data/Qwen/demo/gate.json`。脚本还会保留教师定位 IoU ≥ 0.5 的 fake 和判断正确的 real，写入同目录的 `gate.jsonl`，供 OPSD 训练使用。筛选后仍需包含两类。检查失败时先查看回答和指标，处理后重新检查；通过后进入 **5.2**。
+结果写入 `../MSLoc_data/Qwen/demo/teacher_gate.json`。脚本还会保留教师定位 IoU ≥ 0.5 的 fake 和判断正确的 real，写入同目录的 `teacher_gate.jsonl`，供 OPSD 训练使用。筛选后仍需包含两类。检查失败时先查看回答和指标，处理后重新检查；通过后进入 **5.2**。
 
 <a id="single-training"></a>
 ## 5. 单卡：运行短训练
@@ -288,7 +305,11 @@ python Qwen/demo/train.py \
 
 已有 LoRA 直接通过 `--adapter` 加载，不用修改 `adapter_config.json`。其中 `target_modules` 写成正则表达式也是 [PEFT 支持的格式](https://huggingface.co/docs/peft/v0.20.0/en/package_reference/lora#peft.LoraConfig)。
 
-`train.py` 读取教师检查和 vLLM 对齐结果时，允许训练入口 `train.py` 自身发生变化；其余记录的 Python 文件仍逐一核对。
+使用 `train.py` 训练，且模型、数据没变时：
+
+- **只改了 `train.py` 或 `opsd_loss_plugin.py`：** 已有的教师检查和 vLLM 输入检查结果可以继续用，不用重跑推理。
+- **改了其他相关 Python 代码：** 需要重跑对应的推理和检查。
+- **想从旧 checkpoint 接着训练：** 代码必须和保存该 checkpoint 时一致。改过代码，就不能直接用 `--resume auto` 续跑。
 
 **每一步怎么算：**
 
@@ -300,42 +321,32 @@ python Qwen/demo/train.py \
 
 这里 `lmbda=1` 表示全部使用学生自己生成的回答，`sft_alpha=0` 表示不再额外计算 SFT 的标准答案 loss。它教的是学生在自己实际写出的前缀后，应该怎样继续生成。
 
+JSD 默认每 32 个回答 token 算一块，每块仍比较完整词表。块内调用 ms-swift 原来的 JSD 函数，通过 PyTorch checkpoint 在反向传播时重算中间量，避免把所有块的大张量同时留在显存中。所有块求和后仍按原来的有效 token 数归一化；模型、训练 batch 和回答长度不变。`--jsd-chunk-size 32` 显式指定分块大小，`0` 使用未修改的 swift loss。它与模型层的 `--gradient_checkpointing true` 分别处理 loss 和模型内部的中间量。
+
+训练启动时自动用小型 CPU 张量比较原实现和分块实现的 loss、学生梯度及师生不同前缀下的 token 对齐；不通过会明确报错。依据：[ms-swift JSD 实现](https://github.com/modelscope/ms-swift/blob/v4.5.3/swift/rlhf_trainers/gkd_loss.py)、[PyTorch checkpoint](https://docs.pytorch.org/docs/2.10/checkpoint.html)。
+
 ```bash
 python Qwen/demo/train.py \
   --stage opsd --backend transformers \
   --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/sft/last \
   --teacher-model ../MSLoc_data/Qwen/sft_teacher --teacher-adapter none \
-  --teacher-gate ../MSLoc_data/Qwen/demo/gate.json \
+  --teacher-gate ../MSLoc_data/Qwen/demo/teacher_gate.json \
   --data ../MSLoc_data/Qwen/demo/data --devices 0 \
   --tuner lora --lora-rank 16 --lora-alpha 32 \
-  --steps 32 --save-steps 8 --global-batch-size 8 --learning-rate 2e-5 \
-  --max-length 8192 --max-new-tokens 256 \
+  --steps 32 --save-steps 8 --global-batch-size 8 --generation-batch-size 1 \
+  --jsd-chunk-size 32 \
+  --learning-rate 2e-5 --max-length 8192 --max-new-tokens 256 \
   --output ../MSLoc_data/Qwen/demo/opsd_hf --resume none
 ```
 
 输出 LoRA：`../MSLoc_data/Qwen/demo/opsd_hf/checkpoint-32/`。
 输出训练曲线：`../MSLoc_data/Qwen/demo/opsd_hf/report/report.html`。
 
-**单卡在生成回答时显存不足：** 上面的命令每轮一起生成 8 份回答，学生和教师也同时占用显存。SFT 能跑通不代表这一步也能装进同一张卡。可显式增加 `--generation-batch-size 1`：每轮生成 1 份回答、计算梯度，累积 8 次后更新一次参数，`--global-batch-size 8` 保持不变。不传新参数时仍沿用原来的生成批量。
+**这条命令适用于单卡：** 生成阶段每批处理 1 个样本，loss 阶段每 32 个回答 token 分块重算。累积 8 个样本后更新一次参数，`--global-batch-size 8` 保持不变。两项分别降低生成和 loss 的显存占用。已有输出时，接着跑用 `--resume auto`；另做一次训练则换新的 `--output`。需要清理失败结果时见 [7.3](#resume)。
 
-例如，若第一步就报 `CUDA out of memory`、进度仍为 `0/32`，更新 `train.py` 后可以运行：
+这使用的是 [ms-swift 原有的生成批量参数](https://github.com/modelscope/ms-swift/blob/v4.5.3/swift/rlhf_trainers/args_mixin.py)，训练目标和每次更新的样本数不变；分批会改变随机采样顺序，不保证生成相同回答。它能降低生成阶段的峰值显存。GRPO 的生成批量还必须是 `--num-generations` 的整数倍，例如 4，不能照抄 1。比较速度时，两次运行应使用相同的生成批量。
 
-```bash
-python Qwen/demo/train.py \
-  --stage opsd --backend transformers \
-  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/sft/last \
-  --teacher-model ../MSLoc_data/Qwen/sft_teacher --teacher-adapter none \
-  --teacher-gate ../MSLoc_data/Qwen/demo/gate.json \
-  --data ../MSLoc_data/Qwen/demo/data --devices 0 \
-  --tuner lora --lora-rank 16 --lora-alpha 32 \
-  --steps 32 --save-steps 8 --global-batch-size 8 --generation-batch-size 1 \
-  --learning-rate 2e-5 --max-length 8192 --max-new-tokens 256 \
-  --output ../MSLoc_data/Qwen/demo/opsd_hf --resume none --clean
-```
-
-`--clean` 清理本次失败的 `opsd_hf` 目录后重新开始，不删除 SFT、教师权重或教师检查结果。已有需要保留的训练结果时，改用新的 `--output` 目录。输出位置与上面相同。
-
-这使用的是 [ms-swift 原有的生成批量参数](https://github.com/modelscope/ms-swift/blob/v4.5.3/swift/rlhf_trainers/args_mixin.py)，训练目标和每次更新的样本数不变；分批会改变随机采样顺序，不保证生成相同回答。它能降低生成阶段的峰值显存，但尚未在 24 GB 卡上验证整个训练能否完成。若仍然溢出，需要根据新的报错位置判断，不能保证只改这一项就足够。GRPO 的生成批量还必须是 `--num-generations` 的整数倍，例如 4，不能照抄 1。比较速度时，两次运行应使用相同的生成批量。
+比较 OPSD 速度时，两次 `train.py` 运行还应使用相同的 `--jsd-chunk-size`，报告会检查。该 loss 插件仅用于 `train.py` 的 OPSD，不改正式训练文件，也不改 Ray 的独立计算循环。
 
 如果继续做全参数训练，改为 `--model <完整学生目录> --adapter none --tuner full`，`--teacher-model` 填独立完整教师目录；第 4 节也要使用这两份模型检查。视觉部分仍冻结。
 
@@ -344,7 +355,7 @@ python Qwen/demo/train.py \
 <a id="grpo-training"></a>
 ### 5.3 GRPO：继续训练 OPSD LoRA
 
-默认使用正式实验的 `opsd/last`。模型为每个片段生成多个回答，再根据定位、格式和解释三项奖励更新 LoRA。
+默认接着第 5.2 节的 `demo/opsd_hf/checkpoint-32` 训练。模型为每个片段生成多个回答，再根据定位、格式和解释三项奖励更新 LoRA。
 
 **每一步怎么算：**
 
@@ -359,7 +370,7 @@ python Qwen/demo/train.py \
 ```bash
 python Qwen/demo/train.py \
   --stage grpo --backend transformers \
-  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/opsd/last \
+  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/demo/opsd_hf/checkpoint-32 \
   --data ../MSLoc_data/Qwen/demo/data \
   --nli-model ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small \
   --devices 0 --tuner lora --lora-rank 16 --lora-alpha 32 \
@@ -376,7 +387,7 @@ python Qwen/demo/train.py \
 
 | 从哪里开始 | 修改哪些参数 |
 |---|---|
-| 接着本页 5.2 的 OPSD 结果训练 | `--adapter ../MSLoc_data/Qwen/demo/opsd_hf/checkpoint-32` |
+| 改用正式实验已有的 OPSD 权重 | `--adapter ../MSLoc_data/Qwen/opsd/last` |
 | 跳过 OPSD，直接从正式 SFT 权重训练 | `--adapter ../MSLoc_data/Qwen/sft/last` |
 | 继续做全参数训练 | `--model <完整模型目录> --adapter none --tuner full` |
 
@@ -393,6 +404,8 @@ python Qwen/demo/train.py \
 
 **这一步检查什么：** 同一视频经过 Transformers 和 vLLM 处理后，文本 token、视频像素和时空网格应一致，尤其不能改变原有的非均匀采样时间。输入相同后才有条件比较后端速度；这不要求两种后端生成完全相同的回答。
 
+像素会检查两次：处理器输出的原始像素逐值一致，转换为模型使用的 BF16 后也逐值一致。两边转换精度的时机不同，检查会在相同阶段进行比较。
+
 ```bash
 # 检查底座的输入处理器，这一步不加载 LoRA
 python Qwen/demo/inspect_model.py \
@@ -406,17 +419,29 @@ python Qwen/demo/inspect_model.py \
 
 ### 6.2 用 vLLM 重跑同一项训练
 
-复制 5.2 或 5.3 的完整命令，只修改下面这些参数：
+单卡运行下面的 **GRPO 命令**。本页 OPSD 的独立教师配置还要额外加载一个 vLLM 模型，三份模型权重合计已超过 24 GB；该配置的同卡 vLLM 对比需要更大的显存。多卡角色分离见 [Ray 文档](Ray多角色训练.md)。
 
-| 参数 | OPSD | GRPO |
-|---|---|---|
-| `--backend` | `vllm` | `vllm` |
-| 新增 `--alignment` | `../MSLoc_data/Qwen/demo/alignment/alignment.json` | 同左 |
-| 新增 `--vllm-memory` | `0.35` | `0.35` |
-| `--output` | `../MSLoc_data/Qwen/demo/opsd_vllm` | `../MSLoc_data/Qwen/demo/grpo_vllm` |
+GRPO 使用下面的完整命令，训练起点与 5.3 相同：
 
-**初始模型、adapter、数据和其余训练参数与对应的 HF 运行保持一致。** 例如两次 OPSD 都从同一份 `sft/last` 开始。`--vllm-memory` 是生成引擎的显存预算，不包括训练模型占用。
+```bash
+python Qwen/demo/train.py \
+  --stage grpo --backend vllm \
+  --model ../Qwen/Qwen3.5-4B --adapter ../MSLoc_data/Qwen/demo/opsd_hf/checkpoint-32 \
+  --data ../MSLoc_data/Qwen/demo/data \
+  --nli-model ../MSLoc_data/Qwen/ckpt/nli-deberta-v3-small \
+  --alignment ../MSLoc_data/Qwen/demo/alignment/alignment.json \
+  --vllm-memory 0.5 --devices 0 \
+  --tuner lora --lora-rank 16 --lora-alpha 32 \
+  --steps 32 --save-steps 8 --global-batch-size 8 --num-generations 4 \
+  --learning-rate 1e-6 --max-length 8192 --max-new-tokens 256 \
+  --output ../MSLoc_data/Qwen/demo/grpo_vllm --resume none
+```
 
+更大显存的 GPU 若要比较 OPSD，复制 5.2 的命令，将 `--backend` 改为 `vllm`，添加 `--alignment ../MSLoc_data/Qwen/demo/alignment/alignment.json --vllm-memory 0.35`，将 `--output` 改为 `../MSLoc_data/Qwen/demo/opsd_vllm`。
+
+**初始模型、adapter、数据和其余训练参数与对应的 HF 运行保持一致。** `--vllm-memory` 是生成引擎的显存预算，不包括训练模型占用。
+
+<a id="speed-results"></a>
 ### 6.3 生成速度对比报告
 
 完成哪一组，就运行哪一条：
@@ -434,6 +459,15 @@ python Qwen/demo/report.py \
 ```
 
 打开 `../MSLoc_data/Qwen/demo/opsd_compare/report.html` 或 `grpo_compare/report.html`。报告跳过前 4 步，比较每步耗时、生成速度和训练曲线，计时包含权重同步与监测的开销。
+
+**本次 GRPO 实测（2026-10-18，RTX 4090 D 24 GB）：** 两组均从同一 OPSD checkpoint 连续训练 32 步，比较后 28 步。使用 `msloc_qwen35` 环境。
+
+| 后端 | 平均整步耗时 | 平均生成耗时（含同步） | 平均回答长度 | 采样到的最高设备显存占用 |
+|---|---:|---:|---:|---:|
+| Transformers | 54.62 秒 | 17.42 秒 | 100.13 token | 17.86 GiB |
+| vLLM | 46.15 秒 | 13.48 秒 | 101.65 token | 23.44 GiB |
+
+本次整步速度约为 **1.18 倍**，代价是更多显存；vLLM 每次权重同步平均 0.35 秒，已经计入生成耗时。两组采样的回答不同，因此这是本次完整训练流程的计时结果，不是固定回答长度的纯推理测试。原始记录和图表见 `../MSLoc_data/Qwen/demo/grpo_compare/`。
 
 这里只比较同一张卡上两种生成后端的速度。是否加速以实际结果为准，同时检查生成长度和训练后回答是否正常。各阶段计时可能重叠，不能直接相加；显存图是运行时采样，不代表所有进程的最高显存占用。
 
@@ -476,7 +510,45 @@ python Qwen/demo/view_predictions.py \
 
 打开 `../MSLoc_data/Qwen/demo/before_after.html`，比较同一批片段在 OPSD 训练前后的回答和定位区间。
 
-查看 SFT 或 GRPO 结果时，将 `--adapter` 改为相应训练的 checkpoint，并使用新的推理输出目录。若要比较 GRPO 前后变化，训练前还需用它的初始 OPSD 权重运行一次学生推理，作为比较起点。
+GRPO 按本页命令接着 OPSD 训练时，`student_after` 就是它的训练前结果。完成两组 GRPO 后，分别回载并比较：
+
+```bash
+# Transformers 训练保存的 LoRA
+python Qwen/demo/inspect_model.py \
+  --mode student --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/demo/grpo_hf/checkpoint-32 \
+  --data ../MSLoc_data/Qwen/demo/data --devices 0 \
+  --max-length 8192 --max-new-tokens 256 \
+  --output ../MSLoc_data/Qwen/demo/student_after_grpo_hf --resume none
+
+# vLLM 训练保存的 LoRA，仍用相同的 Transformers 推理入口回载
+python Qwen/demo/inspect_model.py \
+  --mode student --model ../Qwen/Qwen3.5-4B \
+  --adapter ../MSLoc_data/Qwen/demo/grpo_vllm/checkpoint-32 \
+  --data ../MSLoc_data/Qwen/demo/data --devices 0 \
+  --max-length 8192 --max-new-tokens 256 \
+  --output ../MSLoc_data/Qwen/demo/student_after_grpo_vllm --resume none
+
+python Qwen/demo/view_predictions.py \
+  --runs ../MSLoc_data/Qwen/demo/student_after \
+         ../MSLoc_data/Qwen/demo/student_after_grpo_hf \
+         ../MSLoc_data/Qwen/demo/student_after_grpo_vllm \
+  --data ../MSLoc_data/Qwen/demo/data \
+  --output ../MSLoc_data/Qwen/demo/grpo_predictions.html
+```
+
+只完成 HF 训练时，运行第一条推理命令，并从最后一条命令中去掉 `student_after_grpo_vllm`。查看 SFT 结果时，将 `--adapter` 换成 `demo/sft/checkpoint-32`，另用新的推理输出目录。
+
+**本次回载结果：** OPSD、GRPO HF、GRPO vLLM 三份 checkpoint 均成功处理全部 64 个片段。下面记录这批片段上的真实输出，其中有 54 个 fake、10 个 real：
+
+| 学生权重 | fake 平均 IoU | real 判断正确 | 格式或区间错误 |
+|---|---:|---:|---:|
+| 原 SFT LoRA | 0.6239 | 0/10 | 4/64 |
+| OPSD 32 步 | 0.6444 | 0/10 | 3/64 |
+| 接着 GRPO HF 32 步 | 0.6350 | 0/10 | 3/64 |
+| 接着 GRPO vLLM 32 步 | 0.6298 | 0/10 | 3/64 |
+
+这次短训练没有解决 real 误判，GRPO 的定位结果也没有继续提高。错误回答全部保留在页面中。这 64 条同时用于 demo 训练，因此这些数值仅用于检查运行结果，不能作为独立测试集指标。
 
 如果训练时用了 `--tuner full`，则将 `--model` 改为完整 checkpoint 目录，并传 `--adapter none`。
 
@@ -511,10 +583,11 @@ python Qwen/demo/view_predictions.py \
 | 文件 | 看什么 |
 |---|---|
 | `predictions.html` | 学生和教师的回答、定位区间 |
-| `gate.json` | 教师检查是否通过，以及保留多少训练样本 |
+| `teacher_gate.json` | 教师检查是否通过，以及保留多少训练样本 |
 | `sft/report/report.html`、`opsd_hf/report/report.html`、`grpo_hf/report/report.html` | 已运行训练的 loss、奖励和耗时曲线 |
 | 对应训练目录中的 `checkpoint-32/` | 最后保存的 LoRA 或完整模型 |
 | `before_after.html` | 重新加载模型后，训练前后的回答变化 |
+| `grpo_predictions.html` | OPSD 起点与两组 GRPO 训练后的回答对比 |
 | `opsd_compare/report.html`、`grpo_compare/report.html` | 做过 vLLM 对比后，两种后端的速度差异 |
 
 单卡先完成推理、训练、保存后重新加载模型这条流程；OPSD 还要通过教师检查。多卡 Ray 另外查看 [Ray 结果与检查步骤](Ray多角色训练.md#validation)。只展示实际完成的结果，32 步短训练不能代替正式性能评测。
