@@ -16,6 +16,7 @@ import os
 DINO_MODELS = {
     "DINOv2_DeMamba_4", "DINOv2_NeuronDeMamba_4",
     "DINOv3_DeMamba_4", "DINOv3_NeuronDeMamba_4",
+    "UniFormerV2_DeMamba_4", "UniFormerV2_NeuronDeMamba_4",
 }
 
 
@@ -599,7 +600,21 @@ def print_evaluation_metrics(metrics_dict):
 
 def build_model(model_name, neuron_indices_path=None, xclip_model_path=None,
                 dinov3_repo_path=None, dinov3_weights_path=None, dinov3_model_name=None,
-                dinov3_backend=None, dinov3_hf_model_path=None, dinov2_hf_model_path=None):
+                dinov3_backend=None, dinov3_hf_model_path=None, dinov2_hf_model_path=None,
+                uniformerv2_weights_path=None):
+    if model_name in {'UniFormerV2_DeMamba_4', 'UniFormerV2_NeuronDeMamba_4'}:
+        from models.UniFormerV2_DeMamba import UniFormerV2_DeMamba, UniFormerV2_NeuronDeMamba
+        if not uniformerv2_weights_path:
+            raise ValueError("UniFormerV2 requires cfg['uniformerv2_weights_path']")
+        if model_name == 'UniFormerV2_DeMamba_4':
+            return UniFormerV2_DeMamba(uniformerv2_weights_path=uniformerv2_weights_path, class_num=4)
+        if not neuron_indices_path:
+            raise ValueError("UniFormerV2_NeuronDeMamba_4 requires cfg['neuron_indices_path']")
+        return UniFormerV2_NeuronDeMamba(
+            uniformerv2_weights_path=uniformerv2_weights_path,
+            neuron_indices_path=neuron_indices_path,
+            class_num=4,
+        )
     if model_name == 'XCLIP_DeMamba':
         return models.XCLIP_DeMamba(xclip_model_path=xclip_model_path)
     if model_name == 'XCLIP_DeMamba_4':

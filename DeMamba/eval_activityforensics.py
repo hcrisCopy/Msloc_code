@@ -281,6 +281,7 @@ def load_model(cfg: dict, checkpoint_path: Path, device: torch.device, device_id
         dinov3_weights_path=cfg.get("dinov3_weights_path"), dinov3_model_name=cfg.get("dinov3_model_name"),
         dinov3_backend=cfg.get("dinov3_backend"), dinov3_hf_model_path=cfg.get("dinov3_hf_model_path"),
         dinov2_hf_model_path=cfg.get("dinov2_hf_model_path"),
+        uniformerv2_weights_path=cfg.get("uniformerv2_weights_path"),
     ).to(device)
     try:
         checkpoint = torch.load(checkpoint_path, map_location=device)

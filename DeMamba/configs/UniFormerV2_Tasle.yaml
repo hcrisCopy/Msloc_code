@@ -1,0 +1,27 @@
+# Native global video feature + all 768 final-layer patch channels through Mamba.
+model: 'UniFormerV2_DeMamba_4'
+tuning_mode: 'sft'
+task: 'many2many'
+
+save_dir: '../MSLoc_data/DeMamba/results/uniformerv2_baseline_4'
+uniformerv2_weights_path: '../MSLoc_data/DeMamba/pretrained_weights/InternVideo1.0/uniformerv2/k400/k400_uniformerv2_b16_8x224.pyth'
+
+max_epoch: 10
+bath_per_epoch: 1000
+train_batch_size: 32
+val_batch_size: 32
+num_workers: 32
+lr: 0.000001
+
+train_json_path: '../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json'
+test_json_path: '../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json'
+dataset_base_path: '../MSLoc_data/DeMamba/video_frames'
+window_length: 2.0
+frames_per_window: 8
+mode: 'four_class'
+transform_config: {
+  crop_youku: True,
+  normalization: 'uniformerv2',
+  image_size: 224,
+  interpolation: 'linear'
+}

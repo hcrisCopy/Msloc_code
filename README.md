@@ -9,7 +9,7 @@
 
 ## 第一阶段：小模型实验
 
-【可直接运行】小模型阶段的 DINOv2/DINOv3 神经元探测实验，以及 DINOv2/DINOv3/XCLIP 在 ActivityForensics 上的泛化测试，详见 [补充说明](SupplyREADME.md)。
+【可直接运行】小模型阶段的 DINOv2/DINOv3/UniFormerV2 神经元探测实验，以及 DINOv2/DINOv3/UniFormerV2/XCLIP 在 ActivityForensics 上的泛化测试，详见 [补充说明](SupplyREADME.md)。
 
 ### 0. 目录结构
 

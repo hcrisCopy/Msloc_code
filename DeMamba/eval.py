@@ -38,6 +38,7 @@ def load_trained_model(cfg, model_path, device='cuda', device_ids=None):
         dinov3_backend=cfg.get('dinov3_backend'),
         dinov3_hf_model_path=cfg.get('dinov3_hf_model_path'),
         dinov2_hf_model_path=cfg.get('dinov2_hf_model_path'),
+        uniformerv2_weights_path=cfg.get('uniformerv2_weights_path'),
     )
     model = model.to(device)
     

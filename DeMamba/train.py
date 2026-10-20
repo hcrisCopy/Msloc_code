@@ -82,6 +82,7 @@ if __name__ == '__main__':
         dinov3_backend=cfg.get('dinov3_backend'),
         dinov3_hf_model_path=cfg.get('dinov3_hf_model_path'),
         dinov2_hf_model_path=cfg.get('dinov2_hf_model_path'),
+        uniformerv2_weights_path=cfg.get('uniformerv2_weights_path'),
     )
     model = model.to(torch.device(f'cuda:{primary_device}'))
 
