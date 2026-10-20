@@ -1,0 +1,31 @@
+Task: evaluate only the three reference-based factual dimensions below. The user JSON contains prediction and reference, with no final real/fake conclusion, timestamps, localization quality, or generator identity.
+
+Reference has start, main, and end lists. Each entry keeps subject, category, subcategory, and description together. These lists describe phases of the SAME annotated anomaly. Match each predicted observation to its relevant phase and subject. Multiple entries are annotated observations, not a requirement to repeat every entry verbatim. Use subjects and categories explicitly as evidence; accept equivalent wording without requiring exact category names.
+
+object_accuracy (Anomalous Object Accuracy):
+5: The described anomalous object matches the relevant reference object or its core part.
+4: The object description is overly broad or slightly imprecise but relevant.
+3: It is only loosely connected to the reference object.
+2: The main object is substantially wrong, or no anomalous object is identified.
+1: The described anomalous object is unrelated to the reference.
+
+anomaly_type_accuracy (Anomaly Type Accuracy):
+5: The described anomaly matches the reference category and its defining characteristics.
+4: The anomaly is recognized but expressed vaguely.
+3: A related anomaly is described, but its primary nature is missed.
+2: The principal anomaly type is substantially wrong or omitted.
+1: The explanation gives an opposite or unrelated anomaly, or explicitly denies the annotated anomaly.
+
+detail_consistency (Description Consistency & Detail Accuracy):
+5: Core details and applicable before/after state changes agree with the reference.
+4: Core details are covered, but a specific change direction or a minor detail is missing, or there is minor redundancy.
+3: The explanation is generic and lacks the reference's important specifics.
+2: Important details or state changes contradict the reference.
+1: Severe contradictions or reversed changes undermine the explanation.
+
+Do not reward polished wording in these factual dimensions. Judge the whole prediction, including contradictions, rather than only its best matching sentence. If the prediction only describes ordinary activity, do not invent an implied anomaly. Distinguish an omitted detail from explicitly denying it.
+
+If boundary_reference_available is false, boundary details are not available and must not be demanded. Missing reference support alone does not prove an extra observation false; distinguish unverifiable extras from contradictions. Missing key details belong in detail_consistency, not a separate coverage score.
+
+Each reason must identify concrete agreement, imprecision, omission, or contradiction between prediction and reference.
+Return exactly these keys: object_accuracy, anomaly_type_accuracy, detail_consistency.

@@ -1,0 +1,13 @@
+Task: evaluate only conclusion_consistency (Explanation-Conclusion Consistency). The user JSON contains prediction and the model's own conclusion, either real or fake. The conclusion is NOT ground truth. You have no video, reference, localization interval, or localization quality.
+
+Determine whether the described observations support the stated conclusion. For real, ordinary coherent events and explicit absence of forgery evidence may support the conclusion. For fake, the explanation should identify signs of forgery, such as implausible object changes, structural distortions, or inconsistent physical behavior. Unusual but physically plausible events do not automatically demonstrate forgery.
+
+5: The explanation clearly supports the conclusion, with no conflicting observations.
+4: The explanation supports the conclusion, but the link is somewhat implicit or slightly vague.
+3: The explanation is compatible with the conclusion but generic, weakly justified, or largely just repeats the decision.
+2: The explanation gives substantial evidence against the conclusion, or mixes unresolved opposing claims.
+1: The explanation directly contradicts the conclusion or consistently supports the opposite conclusion.
+
+Use exactly the same standard for real and fake. "No object disappears" can support real; "the object vanishes impossibly" can contradict real. Do not penalize a negated anomaly merely because an anomaly word appears. Distinguish uncertainty from contradiction. Do not reward fluent wording here. An explanation and conclusion can be mutually consistent while both are factually wrong; that is outside this task.
+
+Return exactly this key: conclusion_consistency.

@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Configuration
-# API_KEY="0ad05f171df94b16aa9873208eba5a22.aV7kCNxAzFpygOEq"
-API_KEY="7117a451621443b1b550a08acadad5e1.Mljp89b7Rwz7SeiA"
+# API_KEY="ABCD"
+API_KEY="ABCD"
 MODEL="GLM-4.6V-Flash"
 
 # PRED_FILE="RQ/our_ablation_row2.json" 

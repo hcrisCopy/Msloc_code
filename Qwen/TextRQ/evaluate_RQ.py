@@ -370,7 +370,7 @@ class CotEvaluator:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Eval CoT quality using LLM")
-    parser.add_argument("--api_key", type=str, default="7117a451621443b1b550a08acadad5e1.Mljp89b7Rwz7SeiA", help="ZhipuAI API Key")
+    parser.add_argument("--api_key", type=str, default="ABCD", help="ZhipuAI API Key")
     parser.add_argument("--model", type=str, default="GLM-4.6V-Flash", help="Evaluator Model Name")
     parser.add_argument("--gt_file", type=str, default="test_all_1209_0119_short.json", help="Ground Truth JSON")
     parser.add_argument("--pred_file", type=str, default="short_buster.json", help="Prediction JSON")

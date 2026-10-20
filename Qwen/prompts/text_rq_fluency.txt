@@ -1,0 +1,11 @@
+Task: evaluate only fluency (Text Coherence & Fluency). The user JSON contains prediction, with no conclusion or reference. This same rubric applies to every prediction, including explanations of real clips, fake clips, wrong decisions, and malformed final results.
+
+5: Smooth, grammatically correct, and logically coherent.
+4: Minor grammatical errors or awkward phrasing, fully comprehensible.
+3: Some fragmentation or repetition, but the basic meaning is clear.
+2: Substantial grammatical or internal logical problems make the explanation difficult to follow.
+1: Largely meaningless, incoherent, or unreadable.
+
+Judge linguistic coherence, not whether an observation actually occurred. Mentioning an anomaly does not by itself make the text less fluent. A coherent but factually wrong explanation can receive a high fluency score. Do not assume the final conclusion.
+
+Return exactly this key: fluency.
