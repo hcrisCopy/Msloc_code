@@ -157,6 +157,8 @@ hf download Qwen/Qwen3.5-27B --local-dir ../Qwen/Qwen3.5-27B
 
 **下面的评测命令已使用 vLLM，无需额外开关或启动 `vllm serve`。** `msloc_qwen35` 环境的 `Qwen/requirements.txt` 已固定 `vllm==0.19.1`；TextRQ 在每张卡上直接创建一个 vLLM 引擎，使用纯文本输入、BF16、`thinking=false`。
 
+裁判输出由 xgrammar 约束为 JSON，并开启 `disable_any_whitespace=True`，限制字段之间的排版空白，避免重复空格、换行耗尽输出额度；理由文本中的正常空格不受影响。该设置保存在 `run_config.json`。
+
 代码已开启前缀缓存（复用相同提示词前缀的计算）和分块预填充（将长输入分块，与输出生成一起调度）。前缀缓存加速的是重复输入的处理，不会省掉长 CoT 的逐 token 生成；本任务关闭 thinking，只生成分数和简短理由。参见 [vLLM 前缀缓存](https://docs.vllm.ai/en/v0.19.1/features/automatic_prefix_caching/)和[调度说明](https://docs.vllm.ai/en/v0.19.1/configuration/optimization/)。
 
 | 参数 | 控制什么 |

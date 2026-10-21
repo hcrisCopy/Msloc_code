@@ -101,6 +101,7 @@ def configuration(args) -> dict:
         "aggregation": "equal_weight_per_scored_proposal",
         "inference": {
             "thinking": False, "dtype": "bfloat16", "tensor_parallel_size": 1,
+            "structured_outputs": {"backend": "xgrammar", "disable_any_whitespace": True},
             "batch_size": args.batch_size, "max_model_len": args.max_model_len,
             "max_new_tokens": args.max_new_tokens,
             "max_num_batched_tokens": args.max_num_batched_tokens,

@@ -90,7 +90,9 @@ def main() -> None:
         max_num_batched_tokens=settings["max_num_batched_tokens"],
         enable_prefix_caching=True, enable_chunked_prefill=True,
         generation_config="vllm",
-        structured_outputs_config={"backend": "xgrammar"},
+        # Bound JSON formatting whitespace to prevent endless newline generation.
+        # vLLM 0.19.1 passes this flag to xgrammar.compile_json_schema(any_whitespace=False).
+        structured_outputs_config=settings["structured_outputs"],
         disable_log_stats=True,
     )
     tokenizer = llm.get_tokenizer()
