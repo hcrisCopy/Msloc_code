@@ -20,3 +20,5 @@ __pycache__/
 tmp/
 .workbuddy/
 exa-results/
+Msloc_code/Qwen/TextRQ/evaluate_RQ.py
+Msloc_code/Qwen/TextRQ/evaluate_RQ.sh

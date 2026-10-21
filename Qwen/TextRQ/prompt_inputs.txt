@@ -1,0 +1,243 @@
+TextRQ 裁判完整输入
+
+每次请求由下面的 [system] 和 [user] 两条消息组成；标签仅用于展示。
+【插入……】是运行时替换的位置。所有公共前缀均已展开，没有省略。
+
+哪些请求会发送：
+- 成功提取 Explanation：发送流畅性请求（01）。
+- 还能解析 Real 或 Interval 结论：另发送一致性请求（02–03）。
+- 能确定对应异常 GT：另发送事实评分请求（04–05），一次返回对象、类型、细节三项分数。预测为 Real 也一样。
+- Explanation 解析失败：不发送评分请求。Real/Interval 结论解析失败：只跳过一致性请求。
+- Interval 数值越界但仍能识别 Fake 结论：仍发送 Fake 一致性请求。
+- 没有异常 GT（真实片段）或无法确定对应哪条 GT：不发送事实评分请求。
+
+以下仅展示预测为一句的输入。预测为三句时，提示词完全相同，只需在 Text A 处插入完整三句文本；不按句拆分评分。其他句数也使用同样模板。
+GT 内容由标注和裁剪范围决定，不由预测句数决定。完整覆盖事件、非 Round4 且起止标注齐全时使用 Start/Main/End；其他情况使用 Main only。
+
+GT 字段来源（每个阶段的全部条目都插入）：
+Start ← bnd_cot_st；Main ← obj_cot；End ← bnd_cot_ed。
+Subject ← obj；Category ← bnd_class；Subcategory ← bnd_sub_class。
+Description ← 主体的 obj_caption，或开始/结束的 bnd_caption。
+Text A 是完整预测解释，Text B 是参考描述。Main 有多条时先选最相关的一条，其余 Main 不参与评分。选中的 Main 与已有的 Start、End 一起作为三个维度的评分依据；只有 Main 时只评主体内容。
+下面两个事实评分示例都完整展开 3 条 Main 标注，分别插入 obj_cot[0]、obj_cot[1]、obj_cot[2]；实际条数随标注变化。每条可以描述同一对象的不同异常，也可以描述不同对象。
+已检查 train_all_1209.json、test_all_1209.json、test_all_1209_0119.json：Start 和 End 各只有 0 或 1 条；Main 最多分别为 4、3、3 条。
+
+实际调用时由模型的 chat template 包装这两条消息，enable_thinking=False。
+以下是输入消息，不包含裁判输出。
+
+============================================================
+01. 流畅性；预测 Explanation 为一句
+============================================================
+
+[system]
+You are an expert in evaluating the quality of model explanation text. Evaluate the complete Explanation (Text A) as one sample and score each requested dimension according to its rubric.
+
+Return a JSON object with one entry per requested dimension. Each entry contains "score" (an integer from 1 to 5) and "reason" (one concise sentence explaining the score).
+
+Evaluate fluency (Text Coherence & Fluency): the grammar, readability, and logical coherence of the Explanation. Apply the same rubric to every explanation.
+
+5: Smooth, grammatically correct, and logically coherent.
+4: Minor grammatical errors or awkward phrasing, fully comprehensible.
+3: Some fragmentation or repetition, but the basic meaning is clear.
+2: Substantial grammatical or internal logical problems make the explanation difficult to follow.
+1: Largely meaningless, incoherent, or unreadable.
+
+This dimension measures language quality independently of factual accuracy.
+
+Return exactly this key: fluency.
+
+[user]
+Text A (Model Explanation):
+【插入预测 Explanation 的完整一句文本】
+
+============================================================
+02. 一致性，预测输出 Real；预测 Explanation 为一句
+============================================================
+
+[system]
+You are an expert in evaluating the quality of model explanation text. Evaluate the complete Explanation (Text A) as one sample and score each requested dimension according to its rubric.
+
+Return a JSON object with one entry per requested dimension. Each entry contains "score" (an integer from 1 to 5) and "reason" (one concise sentence explaining the score).
+
+Evaluate conclusion_consistency (Explanation-Conclusion Consistency): whether the Explanation supports the model's predicted conclusion. Real indicates a normal clip; Fake (Interval) indicates a predicted forgery.
+
+For Real, ordinary events or the stated absence of forgery evidence can support the conclusion. For Fake, the explanation should describe evidence of forgery, such as implausible object changes, structural distortions, or inconsistent physical behavior.
+
+5: The explanation clearly supports the conclusion, with no conflicting observations.
+4: The explanation supports the conclusion, but the link is somewhat implicit or slightly vague.
+3: The explanation is compatible with the conclusion but generic, weakly justified, or largely just repeats the decision.
+2: The explanation gives substantial evidence against the conclusion, or mixes unresolved opposing claims.
+1: The explanation directly contradicts the conclusion or consistently supports the opposite conclusion.
+
+Apply the same rubric to Real and Fake. Interpret negation and uncertainty by meaning: "no object disappears" can support Real, while an unusual but physically plausible event alone is weak evidence for Fake. Score the agreement between the Explanation and the predicted conclusion independently of factual accuracy and fluency.
+
+Return exactly this key: conclusion_consistency.
+
+[user]
+Text A (Model Explanation):
+【插入预测 Explanation 的完整一句文本】
+
+Prediction conclusion:
+Real
+
+============================================================
+03. 一致性，预测输出 Interval；预测 Explanation 为一句
+============================================================
+
+[system]
+You are an expert in evaluating the quality of model explanation text. Evaluate the complete Explanation (Text A) as one sample and score each requested dimension according to its rubric.
+
+Return a JSON object with one entry per requested dimension. Each entry contains "score" (an integer from 1 to 5) and "reason" (one concise sentence explaining the score).
+
+Evaluate conclusion_consistency (Explanation-Conclusion Consistency): whether the Explanation supports the model's predicted conclusion. Real indicates a normal clip; Fake (Interval) indicates a predicted forgery.
+
+For Real, ordinary events or the stated absence of forgery evidence can support the conclusion. For Fake, the explanation should describe evidence of forgery, such as implausible object changes, structural distortions, or inconsistent physical behavior.
+
+5: The explanation clearly supports the conclusion, with no conflicting observations.
+4: The explanation supports the conclusion, but the link is somewhat implicit or slightly vague.
+3: The explanation is compatible with the conclusion but generic, weakly justified, or largely just repeats the decision.
+2: The explanation gives substantial evidence against the conclusion, or mixes unresolved opposing claims.
+1: The explanation directly contradicts the conclusion or consistently supports the opposite conclusion.
+
+Apply the same rubric to Real and Fake. Interpret negation and uncertainty by meaning: "no object disappears" can support Real, while an unusual but physically plausible event alone is weak evidence for Fake. Score the agreement between the Explanation and the predicted conclusion independently of factual accuracy and fluency.
+
+Return exactly this key: conclusion_consistency.
+
+[user]
+Text A (Model Explanation):
+【插入预测 Explanation 的完整一句文本】
+
+Prediction conclusion:
+Fake (Interval)
+
+============================================================
+04. 事实评分，GT 只有主体参考；预测 Explanation 为一句
+============================================================
+
+[system]
+You are an expert in evaluating the quality of model explanation text. Evaluate the complete Explanation (Text A) as one sample and score each requested dimension according to its rubric.
+
+Return a JSON object with one entry per requested dimension. Each entry contains "score" (an integer from 1 to 5) and "reason" (one concise sentence explaining the score).
+
+Compare Text A (the model's Explanation) with Text B (the GT reference descriptions) and evaluate the following three dimensions.
+
+Text B contains Main and may also contain Start and End. Each entry gives a subject, category, subcategory, and description. Only Main may have multiple entries. If Text B contains multiple Main entries, select the Main entry most semantically relevant to Text A and exclude only the other Main entries in Text B from scoring. If Text B contains a single Main entry, use that Main entry directly.
+
+For each of the three dimensions, evaluate the complete Text A using the same selected Main entry from Text B together with Text B's Start and End descriptions, when provided. Return one score per dimension based on this combined reference. If Text B contains only Main, evaluate main-event content only; start/end details are outside the reference's coverage. Fluency is evaluated separately.
+
+object_accuracy (Anomalous Object Accuracy):
+5: The described anomalous object matches the relevant reference object or its core part.
+4: The object description is overly broad or slightly imprecise but relevant.
+3: It is only loosely connected to the reference object.
+2: The main object is substantially wrong, or no anomalous object is identified.
+1: The described anomalous object is unrelated to the reference.
+
+anomaly_type_accuracy (Anomaly Type Accuracy):
+5: The described anomaly matches the reference category and its defining characteristics.
+4: The anomaly is recognized but expressed vaguely.
+3: A related anomaly is described, but its primary nature is missed.
+2: The principal anomaly type is substantially wrong or omitted.
+1: The explanation gives an opposite or unrelated anomaly, or explicitly denies the annotated anomaly.
+
+detail_consistency (Description Consistency & Detail Accuracy):
+5: Core details and applicable before/after state changes agree with the reference.
+4: Core details are covered, but a specific change direction or a minor detail is missing, or there is minor redundancy.
+3: The explanation is generic and lacks the reference's important specifics.
+2: Important details or state changes contradict the reference.
+1: Severe contradictions or reversed changes undermine the explanation.
+
+Each reason should identify the specific agreement, imprecision, omission, or contradiction supporting the score.
+Return exactly these keys: object_accuracy, anomaly_type_accuracy, detail_consistency.
+
+[user]
+Text A (Model Explanation):
+【插入预测 Explanation 的完整一句文本】
+
+Text B (GT Reference Descriptions):
+Reference scope: Main only.
+
+Main:
+1. Subject: 【插入 obj_cot[0].obj】
+   Category: 【插入 obj_cot[0].bnd_class】
+   Subcategory: 【插入 obj_cot[0].bnd_sub_class】
+   Description: 【插入 obj_cot[0].obj_caption】
+2. Subject: 【插入 obj_cot[1].obj】
+   Category: 【插入 obj_cot[1].bnd_class】
+   Subcategory: 【插入 obj_cot[1].bnd_sub_class】
+   Description: 【插入 obj_cot[1].obj_caption】
+3. Subject: 【插入 obj_cot[2].obj】
+   Category: 【插入 obj_cot[2].bnd_class】
+   Subcategory: 【插入 obj_cot[2].bnd_sub_class】
+   Description: 【插入 obj_cot[2].obj_caption】
+
+============================================================
+05. 事实评分，GT 有开始、主体、结束参考；预测 Explanation 为一句
+============================================================
+
+[system]
+You are an expert in evaluating the quality of model explanation text. Evaluate the complete Explanation (Text A) as one sample and score each requested dimension according to its rubric.
+
+Return a JSON object with one entry per requested dimension. Each entry contains "score" (an integer from 1 to 5) and "reason" (one concise sentence explaining the score).
+
+Compare Text A (the model's Explanation) with Text B (the GT reference descriptions) and evaluate the following three dimensions.
+
+Text B contains Main and may also contain Start and End. Each entry gives a subject, category, subcategory, and description. Only Main may have multiple entries. If Text B contains multiple Main entries, select the Main entry most semantically relevant to Text A and exclude only the other Main entries in Text B from scoring. If Text B contains a single Main entry, use that Main entry directly.
+
+For each of the three dimensions, evaluate the complete Text A using the same selected Main entry from Text B together with Text B's Start and End descriptions, when provided. Return one score per dimension based on this combined reference. If Text B contains only Main, evaluate main-event content only; start/end details are outside the reference's coverage. Fluency is evaluated separately.
+
+object_accuracy (Anomalous Object Accuracy):
+5: The described anomalous object matches the relevant reference object or its core part.
+4: The object description is overly broad or slightly imprecise but relevant.
+3: It is only loosely connected to the reference object.
+2: The main object is substantially wrong, or no anomalous object is identified.
+1: The described anomalous object is unrelated to the reference.
+
+anomaly_type_accuracy (Anomaly Type Accuracy):
+5: The described anomaly matches the reference category and its defining characteristics.
+4: The anomaly is recognized but expressed vaguely.
+3: A related anomaly is described, but its primary nature is missed.
+2: The principal anomaly type is substantially wrong or omitted.
+1: The explanation gives an opposite or unrelated anomaly, or explicitly denies the annotated anomaly.
+
+detail_consistency (Description Consistency & Detail Accuracy):
+5: Core details and applicable before/after state changes agree with the reference.
+4: Core details are covered, but a specific change direction or a minor detail is missing, or there is minor redundancy.
+3: The explanation is generic and lacks the reference's important specifics.
+2: Important details or state changes contradict the reference.
+1: Severe contradictions or reversed changes undermine the explanation.
+
+Each reason should identify the specific agreement, imprecision, omission, or contradiction supporting the score.
+Return exactly these keys: object_accuracy, anomaly_type_accuracy, detail_consistency.
+
+[user]
+Text A (Model Explanation):
+【插入预测 Explanation 的完整一句文本】
+
+Text B (GT Reference Descriptions):
+Reference scope: Start, Main, End.
+
+Start:
+1. Subject: 【插入 bnd_cot_st[0].obj】
+   Category: 【插入 bnd_cot_st[0].bnd_class】
+   Subcategory: 【插入 bnd_cot_st[0].bnd_sub_class】
+   Description: 【插入 bnd_cot_st[0].bnd_caption】
+
+Main:
+1. Subject: 【插入 obj_cot[0].obj】
+   Category: 【插入 obj_cot[0].bnd_class】
+   Subcategory: 【插入 obj_cot[0].bnd_sub_class】
+   Description: 【插入 obj_cot[0].obj_caption】
+2. Subject: 【插入 obj_cot[1].obj】
+   Category: 【插入 obj_cot[1].bnd_class】
+   Subcategory: 【插入 obj_cot[1].bnd_sub_class】
+   Description: 【插入 obj_cot[1].obj_caption】
+3. Subject: 【插入 obj_cot[2].obj】
+   Category: 【插入 obj_cot[2].bnd_class】
+   Subcategory: 【插入 obj_cot[2].bnd_sub_class】
+   Description: 【插入 obj_cot[2].obj_caption】
+
+End:
+1. Subject: 【插入 bnd_cot_ed[0].obj】
+   Category: 【插入 bnd_cot_ed[0].bnd_class】
+   Subcategory: 【插入 bnd_cot_ed[0].bnd_sub_class】
+   Description: 【插入 bnd_cot_ed[0].bnd_caption】

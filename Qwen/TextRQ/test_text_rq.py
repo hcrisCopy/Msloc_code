@@ -179,19 +179,48 @@ class ProtocolTests(unittest.TestCase):
         fake_fluency = judge_messages(fake, templates, "fluency")
         real_fluency = judge_messages(real, templates, "fluency")
         self.assertEqual(fake_fluency[0], real_fluency[0])
-        expected_keys = {
-            "fluency": {"prediction"}, "consistency": {"prediction", "conclusion"},
-            "factual": {"prediction", "reference"},
-        }
+        self.assertEqual(fake_fluency[1]["content"], "Text A (Model Explanation):\n" + fake["explanation"])
         for stage in required_stages(fake):
             messages = judge_messages(fake, templates, stage)
             self.assertTrue(messages[0]["content"].startswith(templates["common"]["text"] + "\n\n"))
-            self.assertEqual(set(json.loads(messages[1]["content"])), expected_keys[stage])
             self.assertEqual(set(score_schema(stage)["properties"]), set(STAGE_FIELDS[stage]))
+        consistency = judge_messages(fake, templates, "consistency")[1]["content"]
+        self.assertEqual(consistency, "Text A (Model Explanation):\n" + fake["explanation"]
+                         + "\n\nPrediction conclusion:\nFake (Interval)")
+        self.assertEqual(judge_messages(real, templates, "consistency")[1]["content"],
+                         "Text A (Model Explanation):\n" + real["explanation"] + "\n\nPrediction conclusion:\nReal")
+        factual = judge_messages(fake, templates, "factual")[1]["content"]
+        self.assertNotIn("Prediction conclusion:", factual)
+        self.assertNotIn("generator", factual)
+        self.assertNotIn("[2, 12]", factual)
+        self.assertIn("Reference scope: Start, Main, End.", factual)
+        for phase in ("start", "main", "end"):
+            for entry in fake["reference"][phase]:
+                for value in entry.values():
+                    self.assertIn(value, factual)
         self.assertEqual(judge_messages(fake, templates, "consistency")[0],
                          judge_messages(real, templates, "consistency")[0])
         with self.assertRaises(ValueError):
             judge_messages(real, templates, "factual")
+
+    def test_main_only_prompt_keeps_all_objects_without_boundary_captions(self):
+        templates = prompts()
+        ann = annotation()
+        ann["combine_dir"] = "Round4/test"
+        for explanation in ("The ball disappears.",
+                            "The ball disappears. Its shadow remains. The ball reappears."):
+            task = prepare([proposal(answer=f"Explanation: {explanation}\nInterval: [2, 12]")],
+                           [ann])["tasks"][0]
+            message = judge_messages(task, templates, "factual")[1]["content"]
+            self.assertTrue(message.startswith("Text A (Model Explanation):\n" + explanation
+                                               + "\n\nText B (GT Reference Descriptions):"))
+            self.assertIn("Reference scope: Main only.", message)
+            self.assertIn("1. Subject: ball", message)
+            self.assertIn("2. Subject: shadow", message)
+            self.assertIn("Description: Its shadow remains.", message)
+            self.assertNotIn("Start:", message)
+            self.assertNotIn("End:", message)
+            self.assertNotIn("The ball suddenly vanishes.", message)
 
     def test_consistency_is_not_in_rq_and_missing_facts_never_become_zero(self):
         fake = prepare([proposal()])["tasks"][0]

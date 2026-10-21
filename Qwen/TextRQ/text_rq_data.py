@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import random
 import sys
@@ -55,7 +54,7 @@ def cot_entries(annotation: dict, field: str, caption_field: str) -> list[dict]:
             raise ValueError(f"{field}: expected string fields {required}")
         if not entry[caption_field].strip():
             raise ValueError(f"{field}: empty caption")
-        # Annotation confidence is not evidence and must not bias the judge.
+        # Keep the annotation score out of the judge input; its meaning is undocumented.
         output.append({
             "subject": entry["obj"].strip(),
             "category": entry["bnd_class"].strip(),
@@ -295,15 +294,34 @@ def validate_scores(value: dict, task: dict) -> float | None:
             if task["reference"] is not None else None)
 
 
+def format_reference(reference: dict) -> str:
+    """Render every CoT entry as labelled text, following the OPSD teacher input style."""
+    phases = ("start", "main", "end") if reference["boundary_reference_available"] else ("main",)
+    scope = "Start, Main, End" if reference["boundary_reference_available"] else "Main only"
+    sections = [f"Reference scope: {scope}."]
+    for phase in phases:
+        lines = [f"{phase.title()}:"]
+        for index, entry in enumerate(reference[phase], 1):
+            lines.extend([
+                f"{index}. Subject: {entry['subject']}",
+                f"   Category: {entry['category']}",
+                f"   Subcategory: {entry['subcategory']}",
+                f"   Description: {entry['description']}",
+            ])
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
 def judge_messages(task: dict, prompts: dict, stage: str) -> list[dict]:
     if stage not in required_stages(task):
         raise ValueError(f"{task['id']}: inapplicable stage {stage}")
-    payload = {"prediction": task["explanation"]}
+    payload = "Text A (Model Explanation):\n" + task["explanation"]
     if stage == "consistency":
-        payload["conclusion"] = task["prediction_kind"]
+        conclusion = "Real" if task["prediction_kind"] == "real" else "Fake (Interval)"
+        payload += "\n\nPrediction conclusion:\n" + conclusion
     elif stage == "factual":
-        payload["reference"] = task["reference"]
+        payload += "\n\nText B (GT Reference Descriptions):\n" + format_reference(task["reference"])
     # All stages share the exact same common prefix. Metadata never reaches the judge.
     prompt = prompts["common"]["text"] + "\n\n" + prompts[stage]["text"]
     return [{"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
+            {"role": "user", "content": payload}]

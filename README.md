@@ -763,7 +763,7 @@ python Qwen/evaluate.py \
 │     （两种情况都不要求补写开始/结束）
 └─ 开始、主体、结束齐全
    ├─ 预测一句 → 看是否涵盖关键内容；缺少重要变化影响细节分，不因句数少直接扣分
-   └─ 预测三句 → 按事件阶段、主体和含义对照，不按句子序号机械配对
+   └─ 预测三句 → 综合对照选中的主体及开始、结束参考，不按句子序号机械配对
 ```
 
 **4. 输出哪些分数**
@@ -782,13 +782,15 @@ python Qwen/evaluate.py \
    └─ 结论解析失败 → 此项留空
 ```
 
-每项 1–5 分，附一句中文理由；Real/Fake 标准相同。每项均分 = 该项有效分数之和 ÷ 该项有效数量（`Valid N`）；留空为 `null`，不补 0。RQ 均分只纳入四项齐全的解释。
+每项 1–5 分，附一句简洁理由；Real/Fake 标准相同。每项均分 = 该项有效分数之和 ÷ 该项有效数量（`Valid N`）；留空为 `null`，不补 0。RQ 均分只纳入四项齐全的解释。
 
 提示词位于 `Qwen/prompts/`，共用 `text_rq_common.txt`。每条 `Explanation` 按适用条件请求裁判 1–3 次：
 
 - **流畅性**：只传预测的 `Explanation` 文本。
 - **解释—结论一致性**：传预测的 `Explanation` 文本，以及从 `Interval` / `Real` 解析出的 Fake / Real 结论；不传 `Interval` 的起止数值。
 - **对象、异常类型、细节准确性**：传预测的 `Explanation` 文本和对应 GT 的文字标注，不传预测的 `Interval` / `Real`。
+
+事实评分中，Text A 是预测解释，Text B 是 GT 参考。Main 有多条时，裁判先选最相关的一条，其余 Main 不参与评分。选中的 Main 与已有的 Start、End 共同用于对象、异常类型、细节三个维度的评分；只有 Main 时只评主体内容。每条参考保留对象、分类、子分类和 caption。完整输入见 [prompt_inputs.txt](Qwen/TextRQ/prompt_inputs.txt)。
 
 **结果怎么统计**
 
