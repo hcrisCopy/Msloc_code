@@ -137,7 +137,7 @@ def reference_target(hits: list, absolute) -> tuple[tuple | None, str]:
 
 
 def prepare_video(prediction: dict, ground_truth: dict, min_iou: float) -> dict:
-    """Retain wrong decisions and low-IoU predictions; GT may be reused."""
+    """Score valid TP/TN only; retain low-IoU TP and allow GT reuse."""
     video = prediction["video_path"]
     source_type = ground_truth["type"]
     if source_type not in {"fake", "real"}:
@@ -191,6 +191,15 @@ def prepare_video(prediction: dict, ground_truth: dict, min_iou: float) -> dict:
         )
         if not valid:
             outcome = "invalid"
+        # Exclusion reasons are mutually exclusive; outcome/status retain diagnostics.
+        if not explanation:
+            selection = "missing_explanation"
+        elif not valid:
+            selection = "invalid_prediction"
+        elif outcome not in {"TP", "TN"}:
+            selection = "incorrect_classification"
+        else:
+            selection = "eligible"
         info = {
             "id": task_id, "video_path": video, "proposal_index": index,
             "source_video_type": source_type, "kind": kind,
@@ -207,10 +216,10 @@ def prepare_video(prediction: dict, ground_truth: dict, min_iou: float) -> dict:
             "high_iou_fake": bool(valid and outcome == "TP" and iou is not None
                                   and iou > min_iou),
             "correct_real": bool(valid and outcome == "TN"),
-            "selection": "eligible" if explanation else "missing_explanation",
+            "selection": selection,
         }
         audit.append(info)
-        if explanation:
+        if selection == "eligible":
             tasks.append({
                 **info, "explanation": explanation,
                 "reference": reference, "raw_response": row["raw_response"],

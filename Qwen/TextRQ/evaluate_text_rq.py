@@ -35,7 +35,8 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--output", required=True)
     parser.add_argument("--devices", default="0,1,2,3,4,5,6,7")
     parser.add_argument("--min-iou", type=float, default=0.7, help="High-IoU subset only; not an input filter")
-    parser.add_argument("--sample-count", type=int, default=-1, help="-1: all proposals with Explanation")
+    parser.add_argument("--sample-count", type=int, default=-1,
+                        help="-1: all valid TP/TN proposals with Explanation")
     parser.add_argument("--bootstrap-repeats", type=int, default=1000, help="Video bootstrap; 0 disables CI")
     parser.add_argument("--batch-size", type=int, default=32, help="Requests per GPU batch")
     parser.add_argument("--max-model-len", type=int, default=8192)
@@ -84,7 +85,7 @@ def configuration(args) -> dict:
     sources = list(Path(__file__).parent.glob("text_rq_*.py")) + [Path(__file__)]
     sources += [code_root / "Qwen/common.py"]
     return {
-        "protocol": "text_rq_v2", "seed": 42,
+        "protocol": "text_rq_v3", "seed": 42,
         "predictions": {"path": args.predictions, "sha256": sha256(Path(args.predictions))},
         "annotation": {"path": args.annotation, "sha256": sha256(Path(args.annotation))},
         "model": model_identity(Path(args.model)), "versions": versions,
@@ -96,7 +97,7 @@ def configuration(args) -> dict:
         "min_iou": args.min_iou, "sample_count": args.sample_count,
         "bootstrap_repeats": args.bootstrap_repeats,
         "matching": "single_visible_gt_else_unique_positive_max_prediction_iou_allow_gt_reuse",
-        "scope": "all_predictions_with_exact_explanation_line_no_classification_or_iou_filter",
+        "scope": "valid_tp_tn_with_explanation_no_iou_filter",
         "aggregation": "equal_weight_per_scored_proposal",
         "inference": {
             "thinking": False, "dtype": "bfloat16", "tensor_parallel_size": 1,
@@ -114,7 +115,8 @@ def initialize(output: Path, config: dict, args) -> None:
     if args.clean and output.exists():
         # A clean operation is limited to a recognized TextRQ run directory.
         if (not manifest.is_file()
-                or read_json(manifest)["config"]["protocol"] not in {"text_rq_v1", "text_rq_v2"}):
+                or read_json(manifest)["config"]["protocol"] not in {
+                    "text_rq_v1", "text_rq_v2", "text_rq_v3"}):
             raise ValueError("--clean refuses a directory without a TextRQ run_config.json")
         shutil.rmtree(output)
     if args.resume == "auto":
@@ -168,6 +170,8 @@ def prepare(output: Path, config: dict) -> tuple[list[dict], list[dict], int]:
                      selected_request_count=sum(len(required_stages(task)) for task in chosen))
     atomic_json(output / "selection_summary.json", selection)
     print("Selection:", json.dumps(selection["selection_counts"], ensure_ascii=False), flush=True)
+    print("Classification:", json.dumps(selection["outcome_counts"], ensure_ascii=False), flush=True)
+    print("Scoring scope: valid TP/TN only; low-IoU TP retained.", flush=True)
     print(f"Selected: {len(chosen)} / {len(tasks)} eligible proposals", flush=True)
     return chosen, audit, no_proposal
 
@@ -296,7 +300,8 @@ def main() -> None:
             "selected_count": len(tasks),
         })
         report = build_report(results, audit, no_proposal, args.min_iou)
-        report.update(run_id=fingerprint(config), source_run=output.as_posix())
+        report.update(run_id=fingerprint(config), source_run=output.as_posix(),
+                      protocol=config["protocol"])
         write_report(output / "reports" / "default", report)
         print(f"Results: {output / 'scores.jsonl'}; {output / 'summary.json'}", flush=True)
 

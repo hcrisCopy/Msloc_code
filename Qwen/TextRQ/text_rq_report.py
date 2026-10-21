@@ -92,6 +92,8 @@ def format_report(report: dict) -> str:
         "Conclusion consistency is separate. N/A means no applicable scores.",
         f"Videos without proposals: {report['videos_without_proposals']}",
     ]
+    if report.get("protocol") == "text_rq_v3":
+        lines.insert(2, "Scoring scope: valid TP/TN only; FP/FN/invalid excluded; low-IoU TP retained.")
     heading = "Domain" if report["group_by"] == "tool_domain" else "Group"
 
     def number(value):
@@ -208,9 +210,9 @@ def main() -> None:
     if not args.output.resolve().is_relative_to(reports_root):
         raise ValueError("--output must be inside RUN/reports/")
     manifest = read_json(args.run / "run_config.json")
-    if (manifest["config"]["protocol"] != "text_rq_v2"
+    if (manifest["config"]["protocol"] not in {"text_rq_v2", "text_rq_v3"}
             or manifest["run_id"] != fingerprint(manifest["config"])):
-        raise ValueError("Invalid TextRQ v2 run manifest")
+        raise ValueError("Invalid TextRQ v2/v3 run manifest")
     tasks = read_json(args.run / "tasks.json")
     from tqdm import tqdm
 
@@ -223,7 +225,8 @@ def main() -> None:
         raise ValueError("Saved task/audit counts differ from selection summary")
     report = build_report(results, audit, selection["videos_without_proposals"],
                           args.min_iou, args.group_by)
-    report.update(run_id=manifest["run_id"], source_run=args.run.as_posix())
+    report.update(run_id=manifest["run_id"], source_run=args.run.as_posix(),
+                  protocol=manifest["config"]["protocol"])
     write_report(args.output, report)
 
 

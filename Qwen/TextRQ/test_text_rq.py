@@ -84,18 +84,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(len(data["tasks"][0]["reference"]["main"]), 2)
         self.assertTrue(data["tasks"][0]["reference"]["boundary_reference_available"])
 
-    def test_wrong_class_low_iou_and_exact_threshold_are_kept(self):
+    def test_wrong_class_excluded_but_low_iou_and_exact_threshold_kept(self):
         data = prepare([
             proposal(0, answer="Explanation: The ball disappears.\nInterval: [2, 9]"),
             proposal(1, answer="Explanation: A ball moves normally.\nReal"),
             proposal(2, answer="Explanation: The ball disappears.\nInterval: [0, 1]"),
         ])
-        self.assertEqual(len(data["tasks"]), 3)
-        self.assertEqual([row["high_iou_fake"] for row in data["tasks"]], [False] * 3)
-        self.assertEqual([row["iou"] for row in data["tasks"]], [0.7, None, 0.0])
-        self.assertEqual(data["tasks"][1]["outcome"], "FN")
+        self.assertEqual(len(data["tasks"]), 2)
+        self.assertEqual([row["proposal_index"] for row in data["tasks"]], [0, 2])
+        self.assertEqual([row["high_iou_fake"] for row in data["tasks"]], [False] * 2)
+        self.assertEqual([row["iou"] for row in data["tasks"]], [0.7, 0.0])
+        self.assertEqual(data["audit"][1]["outcome"], "FN")
+        self.assertEqual(data["audit"][1]["selection"], "incorrect_classification")
+        self.assertEqual(data["tasks"][1]["reference_policy"], "single_gt_in_proposal")
         self.assertIn("factual", required_stages(data["tasks"][1]))
-        self.assertEqual(data["tasks"][2]["reference_policy"], "single_gt_in_proposal")
 
     def test_multi_gt_match_and_ambiguous_reference(self):
         annotations = [annotation([10, 20], "first"), annotation([40, 50], "second")]
@@ -105,11 +107,11 @@ class ProtocolTests(unittest.TestCase):
             proposal(2, [0, 60], "Explanation: The ball disappears.\nInterval: [25, 30]"),
         ]
         tasks = prepare(rows, annotations)["tasks"]
+        self.assertEqual(len(tasks), 2)
         self.assertEqual(tasks[0]["matched_gt_index"], 1)
         self.assertEqual(tasks[0]["tool_domain"], "second")
         self.assertEqual(tasks[0]["iou"], 0.8)
         self.assertIsNone(tasks[1]["reference"])
-        self.assertIsNone(tasks[2]["reference"])
         self.assertEqual(tasks[1]["tool_domain"], "mixed")
         self.assertEqual(tasks[1]["video_domains"], ["first", "second"])
         tied = prepare([proposal(0, [0, 30])], [annotation(), annotation()])["tasks"][0]
@@ -117,36 +119,70 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(tied["reference_policy"], "ambiguous_multiple_gt")
 
     def test_real_gt_false_positive_and_background_have_no_factual_reference(self):
-        fake_prediction = prepare([proposal()], [], "real", tool_domain="camera")["tasks"][0]
+        data = prepare([proposal()], [], "real", tool_domain="camera")
+        self.assertEqual(data["tasks"], [])
+        fake_prediction = data["audit"][0]
         self.assertEqual(fake_prediction["outcome"], "FP")
         self.assertEqual(fake_prediction["tool_domain"], "camera")
-        self.assertIsNone(fake_prediction["reference"])
+        self.assertFalse(fake_prediction["reference_available"])
         self.assertIsNone(fake_prediction["iou"])
-        self.assertEqual(required_stages(fake_prediction), ["fluency", "consistency"])
+        self.assertEqual(fake_prediction["selection"], "incorrect_classification")
         normal = proposal(window=[30, 35], answer="Explanation: A person walks naturally.\nReal")
         background = prepare([normal])["tasks"][0]
         self.assertTrue(background["correct_real"])
         self.assertEqual(background["tool_domain"], "generator")
         self.assertIsNone(background["reference"])
+        self.assertEqual(required_stages(background), ["fluency", "consistency"])
         real = prepare([normal], [], "real")["tasks"][0]
         self.assertEqual(real["tool_domain"], "real")
 
-    def test_format_failure_keeps_exact_explanation_without_guessing_conclusion(self):
+    def test_invalid_outputs_are_audited_without_judge_requests(self):
         tasks = prepare([
             proposal(0, answer="Explanation: A person walks.\nMaybe fake"),
             proposal(1, answer="Explanation: A person walks.\nInterval: [0, 99]"),
             proposal(2, answer="Unstructured prose with no Explanation field."),
+            proposal(3, answer="Explanation:   \nReal"),
         ])
-        self.assertEqual(len(tasks["tasks"]), 2)
-        malformed, out_of_range = tasks["tasks"]
+        self.assertEqual(tasks["tasks"], [])
+        malformed, out_of_range = tasks["audit"][:2]
         self.assertIsNone(malformed["prediction_kind"])
-        self.assertEqual(required_stages(malformed), ["fluency", "factual"])
+        self.assertEqual(malformed["selection"], "invalid_prediction")
         self.assertEqual(out_of_range["prediction_kind"], "fake")
         self.assertIsNone(out_of_range["iou"])
         self.assertEqual(out_of_range["outcome"], "invalid")
         self.assertFalse(out_of_range["high_iou_fake"])
+        self.assertEqual(out_of_range["selection"], "invalid_prediction")
         self.assertEqual(tasks["audit"][2]["selection"], "missing_explanation")
+        self.assertEqual(tasks["audit"][3]["selection"], "missing_explanation")
         self.assertTrue(prepare([])["no_proposal"])
+
+    def test_excluded_predictions_remain_in_counts_not_score_denominators(self):
+        data = prepare([
+            proposal(0),
+            proposal(1, answer="Explanation: A ball moves normally.\nReal"),
+            proposal(2, [30, 35], "Explanation: The ball disappears.\nInterval: [0, 5]"),
+            proposal(3, [30, 35], "Explanation: A ball moves normally.\nReal"),
+            proposal(4, answer="Explanation: The ball disappears.\nFake"),
+        ])
+        self.assertEqual([task["outcome"] for task in data["tasks"]], ["TP", "TN"])
+        rows = [scored(task) for task in data["tasks"]]
+        summary = summarize(rows, data["audit"], 0)
+        self.assertEqual(summary["outcome_counts"],
+                         {"TP": 1, "FN": 1, "FP": 1, "TN": 1, "invalid": 1})
+        self.assertEqual(summary["selection_counts"],
+                         {"eligible": 2, "incorrect_classification": 2, "invalid_prediction": 1})
+        self.assertEqual(summary["input_proposals"], 5)
+        self.assertEqual(summary["all"]["count"], 2)
+        self.assertEqual(summary["all"]["rq_count"], 1)
+        self.assertEqual(summary["all"]["dimensions"]["conclusion_consistency"]["count"], 2)
+        self.assertEqual(len(iou_pairs(rows)), 1)
+        report = build_report(rows, data["audit"], 0, 0.7)
+        report["protocol"] = "text_rq_v3"
+        self.assertIn("Scoring scope: valid TP/TN only", format_report(report))
+        for outcome in ("FP", "FN", "invalid"):
+            self.assertEqual(report["input"]["outcome_counts"][outcome], 1)
+            self.assertEqual(report["overall"]["by_outcome"][outcome]["count"], 0)
+            self.assertIsNone(report["overall"]["by_outcome"][outcome]["rq_mean"])
 
     def test_partial_and_round4_reference_boundary_policy(self):
         partial = proposal(window=[11, 20],
@@ -324,7 +360,8 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("generator", report["by_tool_domain"])
         constant = [{**row, "rq": 4} for row in pairs]
         self.assertIsNone(correlation(constant, "rq", 0)["spearman"])
-        real = prepare([proposal()], [], "real")["tasks"][0]
+        real = prepare([proposal(answer="Explanation: A ball moves normally.\nReal")],
+                       [], "real")["tasks"][0]
         self.assertEqual(iou_pairs([scored(real)]), [])
 
     def test_request_level_resume_identity_and_assembled_result(self):
