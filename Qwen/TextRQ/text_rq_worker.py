@@ -18,6 +18,24 @@ from text_rq_storage import (
 )
 
 
+def encode_judge_prompt(tokenizer, messages: list[dict], settings: dict, label: str) -> dict:
+    # Transformers 5.9 defaults to return_dict=True; vLLM requires list[int].
+    # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/tokenization_utils_base.py
+    tokens = tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True, enable_thinking=False,
+        return_dict=False, return_tensors=None,
+    )
+    if (not isinstance(tokens, list) or not tokens
+            or any(type(token) is not int or token < 0 for token in tokens)):
+        raise TypeError(f"{label}: chat template must return a nonempty list of integer token IDs")
+    if len(tokens) + settings["max_new_tokens"] > settings["max_model_len"]:
+        raise ValueError(
+            f"{label}: input {len(tokens)} + output budget "
+            f"{settings['max_new_tokens']} exceeds --max-model-len; no truncation"
+        )
+    return {"prompt_token_ids": tokens}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
@@ -89,15 +107,7 @@ def main() -> None:
         prompts = []
         for task, stage in batch:
             messages = judge_messages(task, config["prompts"], stage)
-            tokens = tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=True, enable_thinking=False,
-            )
-            if len(tokens) + settings["max_new_tokens"] > settings["max_model_len"]:
-                raise ValueError(
-                    f"{task['id']}: input {len(tokens)} + output budget "
-                    f"{settings['max_new_tokens']} exceeds --max-model-len; no truncation"
-                )
-            prompts.append({"prompt_token_ids": tokens})
+            prompts.append(encode_judge_prompt(tokenizer, messages, settings, f"{task['id']}/{stage}"))
         started = time.monotonic()
         responses = llm.generate(
             prompts, sampling_params=[parameters[stage] for _, stage in batch],

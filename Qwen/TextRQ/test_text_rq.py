@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from text_rq_data import (
@@ -22,6 +23,7 @@ from text_rq_storage import (
     assemble_result, atomic_json, checked_request, checked_result, fingerprint,
     request_path, result_path,
 )
+from text_rq_worker import encode_judge_prompt
 
 
 def annotation(segment=None, domain="generator"):
@@ -76,6 +78,33 @@ def prompts():
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_vllm_prompt_uses_ids_with_transformers_dict_default(self):
+        ids = [101, 102, 103, 104]
+
+        def chat_template(messages, *, return_dict=True, **kwargs):
+            # Reproduce the Transformers 5.9 default without downloading a tokenizer.
+            return {"input_ids": ids, "attention_mask": [1] * len(ids)} if return_dict else ids
+
+        tokenizer = Mock()
+        tokenizer.apply_chat_template.side_effect = chat_template
+        messages = [{"role": "user", "content": "Score this explanation."}]
+        settings = {"max_new_tokens": 2, "max_model_len": 6}
+        result = encode_judge_prompt(tokenizer, messages, settings, "sample/fluency")
+        self.assertEqual(result, {"prompt_token_ids": ids})
+        self.assertFalse(tokenizer.apply_chat_template.call_args.kwargs["enable_thinking"])
+        with self.assertRaisesRegex(ValueError, "input 4.*no truncation"):
+            encode_judge_prompt(tokenizer, messages, {**settings, "max_model_len": 5},
+                                "sample/fluency")
+
+    def test_vllm_prompt_rejects_non_integer_ids_before_submission(self):
+        settings = {"max_new_tokens": 2, "max_model_len": 100}
+        for invalid in ({"input_ids": [1]}, "input_ids", ["input_ids"], [[1]], [], [True], [-1]):
+            with self.subTest(value=invalid):
+                tokenizer = Mock()
+                tokenizer.apply_chat_template.return_value = invalid
+                with self.assertRaisesRegex(TypeError, "integer token IDs"):
+                    encode_judge_prompt(tokenizer, [], settings, "sample/fluency")
+
     def test_repeated_gt_all_objects_and_no_one_to_one_deduplication(self):
         data = prepare([proposal(0), proposal(1)])
         self.assertEqual(len(data["tasks"]), 2)

@@ -136,7 +136,7 @@
 
 所有命令均在项目根目录 `Msloc_code/` 下运行。复用第二阶段的 `msloc_qwen35` 环境；安装步骤见[主 README 的环境配置](../../README.md#环境配置)。
 
-单卡 24GB 先用 4B 调试；9B、27B 按需下载，用于后续裁判对照。
+正式评测用 27B，单卡 24GB 用 4B 调试；9B 按需下载用于对照。
 
 ```bash
 conda activate msloc_qwen35
@@ -145,7 +145,7 @@ hf download Qwen/Qwen3.5-9B --local-dir ../Qwen/Qwen3.5-9B
 hf download Qwen/Qwen3.5-27B --local-dir ../Qwen/Qwen3.5-27B
 ```
 
-均使用官方原始权重、纯文本输入、BF16 和 `thinking=false`。4B 先验证流程，9B／27B 用于裁判对照，正式选型依据人工评分一致性。
+均使用官方原始权重、纯文本输入、BF16 和 `thinking=false`。4B 用于验证流程，27B 用于正式评分。
 
 | 裁判 | `--model` | `--output` |
 |---|---|---|
@@ -177,19 +177,19 @@ hf download Qwen/Qwen3.5-27B --local-dir ../Qwen/Qwen3.5-27B
 python -m unittest discover -s Qwen/TextRQ -p "test_text_rq.py" -v
 ```
 
-下面使用 4B 单卡评测 GRPO-from-SFT 输出，结果写入 `../MSLoc_data/Qwen/text_rq/grpo_from_sft_4b/`。切换裁判时按上表同时替换 `--model` 和 `--output`；不同裁判不共用评分缓存。
+下面使用 27B 裁判进行八卡全量评测，读取 GRPO-from-SFT 输出，结果写入 `../MSLoc_data/Qwen/text_rq/grpo_from_sft_27b/`。每张卡加载完整裁判并处理一份样本；不同裁判不共用评分缓存。
 
 ```bash
 python Qwen/TextRQ/evaluate_text_rq.py \
   --predictions ../MSLoc_data/Qwen/grpo_from_sft_eval/predictions.json \
   --annotation ../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json \
-  --model ../Qwen/Qwen3.5-4B \
+  --model ../Qwen/Qwen3.5-27B \
   --common-prompt Qwen/prompts/text_rq_common.txt \
   --fluency-prompt Qwen/prompts/text_rq_fluency.txt \
   --consistency-prompt Qwen/prompts/text_rq_consistency.txt \
   --factual-prompt Qwen/prompts/text_rq_factual.txt \
-  --output ../MSLoc_data/Qwen/text_rq/grpo_from_sft_4b \
-  --devices 0 \
+  --output ../MSLoc_data/Qwen/text_rq/grpo_from_sft_27b \
+  --devices 0,1,2,3,4,5,6,7 \
   --min-iou 0.7 \
   --sample-count -1 \
   --bootstrap-repeats 1000 \
@@ -204,8 +204,8 @@ python Qwen/TextRQ/evaluate_text_rq.py \
   --resume none
 ```
 
-- **先调试 32 条**：改 `--sample-count 32 --output ../MSLoc_data/Qwen/text_rq/grpo_from_sft_4b_debug`；数量不能超过可评分的 TP/TN 数。调试时可用 `--bootstrap-repeats 0` 跳过置信区间计算。
-- **单卡全量**：使用上面的命令。八卡改为 `--devices 0,1,2,3,4,5,6,7`，每张卡加载完整裁判并处理一份样本；`--batch-size 32` 表示每卡每批 32 个裁判请求。
+- **单卡 24GB 调试 32 条**：改 `--model ../Qwen/Qwen3.5-4B --devices 0 --sample-count 32 --output ../MSLoc_data/Qwen/text_rq/grpo_from_sft_4b_debug`；数量不能超过可评分的 TP/TN 数。调试时可用 `--bootstrap-repeats 0` 跳过置信区间计算。
+- **27B 单卡全量**：显存足够容纳完整模型及缓存时，只改 `--devices 0`；24GB 卡使用上面的 4B 调试设置。`--batch-size 32` 表示每卡每批 32 个裁判请求。
 - **只检查任务清单**：加 `--prepare-only`，不加载裁判；开始评分时去掉它，改为 `--resume auto`，其余参数保持一致。
 - **换待评模型输出**：替换 `--predictions` 和 `--output`。调试、全量或不同裁判使用不同输出目录。
 
@@ -227,8 +227,8 @@ python Qwen/TextRQ/evaluate_text_rq.py \
 
 ```bash
 python Qwen/TextRQ/text_rq_report.py \
-  --run ../MSLoc_data/Qwen/text_rq/grpo_from_sft_4b \
-  --output ../MSLoc_data/Qwen/text_rq/grpo_from_sft_4b/reports/by_domain \
+  --run ../MSLoc_data/Qwen/text_rq/grpo_from_sft_27b \
+  --output ../MSLoc_data/Qwen/text_rq/grpo_from_sft_27b/reports/by_domain \
   --group-by tool_domain \
   --min-iou 0.7
 ```
