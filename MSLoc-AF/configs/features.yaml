@@ -1,0 +1,14 @@
+# Run from MSLoc-AF/: python extract_features.py --config configs/features.yaml
+train_json_path: ../../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json
+test_json_path: ../../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json
+dataset_base_path: ../../MSLoc_data/DeMamba/video_frames
+xclip_model_path: ../../MSLoc_data/DeMamba/pretrained_weights/xclip-base-patch16
+checkpoint: ../../MSLoc_data/DeMamba/results/all_Class_4/best_acc.pth
+features_path: ../../MSLoc_data/artifacts/features
+frame_fps: 8.0
+window_length: 2.0
+window_stride: 2.0
+frames_per_window: 8
+frame_count_tolerance: 4
+extract_batch_size: 2
+show_progress: true

@@ -1,0 +1,21 @@
+# Paths are relative to MSLoc-AF/, as in the original MSLoc-PG configs.
+variant: xclip
+train_json_path: ../../MSLoc_data/data/Tasle-CoT-10K/annos/train_all_1209.json
+test_json_path: ../../MSLoc_data/data/Tasle-CoT-10K/annos/test_all_1209_0119.json
+features_path: ../../MSLoc_data/artifacts/features
+save_dir: ../../MSLoc_data/ActionFormer/results/xclip
+max_epoch: 30
+train_batch_size: 2
+num_workers: 0
+lr: 0.0001
+weight_decay: 0.05
+warmup_epochs: 5
+width: 512
+max_seq_len: null  # derive from TASLE training feature length; do not copy THUMOS T
+attention_window: 19
+branches: 5
+ema_decay: 0.999
+score_threshold: 0.5  # TASLE reporting protocol; official candidate/NMS min_score remains 0.001
+checkpoint_every_updates: 20
+seed: 42
+show_progress: true

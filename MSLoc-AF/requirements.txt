@@ -1,0 +1,5 @@
+# Install the existing MSLoc-PG environment first; extraction reuses its model.
+# Compile the upstream C++ NMS in vendor/actionformer/libs/utils (see README).
+-r ../MSLoc-PG/requirements.txt
+joblib
+ninja
